@@ -4,6 +4,7 @@ Every job ever seen lives in `jobs`. `applications` records each apply
 attempt. `events` is a running audit trail for debugging and reports.
 """
 import datetime as dt
+import difflib
 import hashlib
 import re
 import sqlite3
@@ -78,26 +79,64 @@ class Tracker:
         self.con.commit()
 
     # ---------- jobs ----------
+    def _fuzzy_id(self, company: str, title: str, location: str):
+        """Cross-site tolerance pass: per-site parses differ slightly
+        (punctuation, extra words) but it is the SAME job. Merge those."""
+        nt, nc = norm_text(title), norm_text(company)
+        nloc = norm_text(location)
+        loc_tok = nloc.split()[0] if nloc.split() else ""
+        if not nt:
+            return None
+        for r in self.con.execute(
+                "SELECT id,title,company,location FROM jobs").fetchall():
+            rt, rc = norm_text(r["title"]), norm_text(r["company"])
+            same_t = rt == nt \
+                or difflib.SequenceMatcher(None, rt, nt).ratio() >= 0.90
+            if not same_t:
+                continue
+            same_c = bool(
+                nc and rc
+                and (rc == nc or (nc.split() and rc.split()
+                                  and nc.split()[0] == rc.split()[0])))
+            if not same_c:
+                continue
+            tl = norm_text(r["location"])
+            r_tok = tl.split()[0] if tl.split() else ""
+            if not loc_tok or not r_tok or loc_tok == r_tok:
+                return r["id"]
+        return None
+
+    def _write_update(self, jid, *, source_job_id, url, description, posted_date,
+                      score, score_reasons):
+        self.con.execute(
+            """UPDATE jobs SET source_job_id=COALESCE(?,source_job_id),
+                   url=COALESCE(?,url), description=COALESCE(?,description),
+                   posted_date=COALESCE(?,posted_date),
+                   score=COALESCE(NULLIF(?,0),score),
+                   score_reasons=CASE WHEN ?<>'' THEN ? ELSE score_reasons END,
+                   updated_at=?
+               WHERE id=?""",
+            (source_job_id, url, description, posted_date, score, score_reasons,
+             score_reasons, now(), jid))
+        self.con.commit()
+
     def upsert_job(self, *, source, source_job_id, url, title, company, location,
                    description, posted_date, score=0, score_reasons="", status=None):
         """Returns (job_id, is_new). Cross-post duplicates get the existing id."""
         fp = fingerprint(company, title, location)
+        created = now()
         existing = self.con.execute(
             "SELECT id FROM jobs WHERE fingerprint = ?", (fp,)).fetchone()
-        created = now()
         if existing:
             jid = existing["id"]
-            self.con.execute(
-                """UPDATE jobs SET source_job_id=COALESCE(?,source_job_id),
-                       url=COALESCE(?,url), description=COALESCE(?,description),
-                       posted_date=COALESCE(?,posted_date),
-                       score=COALESCE(NULLIF(?,0),score),
-                       score_reasons=CASE WHEN ?<>'' THEN ? ELSE score_reasons END,
-                       updated_at=?
-                   WHERE id=?""",
-                (source_job_id, url, description, posted_date, score, score_reasons,
-                 score_reasons, created, jid))
-            self.con.commit()
+        else:
+            fuzzy = self._fuzzy_id(company, title, location)
+            if fuzzy:
+                jid, existing = fuzzy, True
+        if existing:
+            self._write_update(jid, source_job_id=source_job_id, url=url,
+                               description=description, posted_date=posted_date,
+                               score=score, score_reasons=score_reasons)
             return jid, False
         cur = self.con.execute(
             """INSERT INTO jobs (fingerprint, source, source_job_id, url, title, company,
