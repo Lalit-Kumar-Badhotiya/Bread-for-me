@@ -11,6 +11,7 @@ Login (email/OTP) is manual-once, then the session persists.
 """
 import re
 import time
+import datetime as dt
 
 from ..scorer import score_job
 from .base import BaseSiteBot, Page
@@ -52,6 +53,23 @@ GATHER_JS = """
 
 def slugify(t: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", (t or "").lower()).strip("-")
+
+
+def posted_date_from_text(raw: str) -> str:
+    """Naukri shows 'X days ago' style chips — convert to an ISO date so the
+    scorer's freshness/max_age_days checks actually work."""
+    l = (raw or "").lower()
+    today = dt.date.today()
+    if re.search(r"\bfew hours?\b|\bjust now\b|\btoday\b", l):
+        return today.isoformat()
+    m = re.search(r"(\d+)\s*hour", l)
+    if m:
+        return today.isoformat()
+    for rx, mult in ((r"(\d+)\s*day", 1), (r"(\d+)\s*week", 7), (r"(\d+)\s*month", 30)):
+        m = re.search(rx, l)
+        if m:
+            return (today - dt.timedelta(days=int(m.group(1)) * mult)).isoformat()
+    return ""
 
 
 class NaukriBot(BaseSiteBot):
@@ -133,7 +151,8 @@ class NaukriBot(BaseSiteBot):
             if ("," in l or "/" in l) and not re.search(r"\d+\.\d|reviews?|skills", l, re.I):
                 location = l.strip()[:80]
                 break
-        score, reasons, reject = score_job(title, company, location, raw, "", self.targets)
+        score, reasons, reject = score_job(title, company, location, raw,
+                                           posted_date_from_text(raw), self.targets)
         min_score = int(self.targets.get("min_score", 70))
         status = "skipped" if (reject or score < min_score) else "queued"
         job_id = url.rstrip("/").rsplit("/", 1)[-1]
@@ -143,7 +162,7 @@ class NaukriBot(BaseSiteBot):
             score=score, score_reasons="; ".join(reasons), status=status)
         if not is_new:
             self.tracker.set_status(jid, status, "; ".join(reasons)[:200])
-            return False
+            return status == "queued"  # re-classified: counts when (re)queued
         return status == "queued"
 
     # ================================================================== APPLY
