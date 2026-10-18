@@ -214,6 +214,14 @@ class NaukriBot(BaseSiteBot):
         except Exception:
             pass
 
+    def external_apply_signal(self, page: Page) -> bool:
+        """Naukri hands off to the company website with this banner."""
+        try:
+            content = (page.content() or "").lower()
+            return "redirected to the company website" in content
+        except Exception:
+            return False
+
     def _login_needed(self, page: Page) -> bool:
         if super()._login_needed(page):
             return True

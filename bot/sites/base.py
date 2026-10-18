@@ -541,6 +541,10 @@ class BaseSiteBot:
         """Site override: skip/close optional nudge overlays that block the flow."""
         pass
 
+    def external_apply_signal(self, page: Page) -> bool:
+        """Site override: page shows the apply flow handed off to a company site."""
+        return False
+
     def wizard(self, page: Page, jid, apply_loc) -> tuple[str, str, str]:
         """Generic apply flow from the Apply click to submission/confirmation.
 
@@ -570,6 +574,9 @@ class BaseSiteBot:
         if self.applied_signal(page):
             # e.g. Naukri 1-click apply: the click already submitted, page shows "Applied"
             return ("applied", "applied state detected after click", "")
+        if self.external_apply_signal(page):
+            return ("needs_you", "external apply flow (company website)",
+                    self.safe_shot(page, f"external_{jid}"))
         max_steps = int((self.settings.get("limits", {}) or {}).get("max_wizard_steps", 30))
         stall = 0
         for _step in range(max_steps):
@@ -594,6 +601,9 @@ class BaseSiteBot:
                 if (self._at_confirmation(page) or self._at_confirmation_safe(target)
                         or self.applied_signal(page)):
                     return ("applied", "", "")
+                if self.external_apply_signal(page):
+                    return ("needs_you", "external apply flow (company website)",
+                            self.safe_shot(page, f"external_{jid}"))
                 if not leftover and not self._form_present(target):
                     return ("applied", "form closed without confirmation", "")
                 return ("needs_you", "no next/submit button found",
