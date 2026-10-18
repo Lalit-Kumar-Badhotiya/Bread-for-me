@@ -35,9 +35,10 @@ class Notifier:
     def _toast(title: str, message: str):
         try:
             from plyer import notification
+            # Windows balloon tips cap strings; plyer crashes on overflow.
             notification.notify(
-                title=f"ApplyBot — {title}",
-                message=message[:250],
+                title=("ApplyBot — " + title)[:60],
+                message=message[:60],
                 app_name="applybot",
                 timeout=10,
             )

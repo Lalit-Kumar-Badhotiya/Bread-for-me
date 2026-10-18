@@ -63,8 +63,12 @@ class IndeedGroupBot(BaseSiteBot):
         self.notify.send(f"[{self.name}] '{title}': {len(items)} cards harvested")
         if not items:
             dump = page.evaluate("""
-() => [...new Set([...document.querySelectorAll('a')].map(a => (a.href || '')
-      .split('#')[0]).filter(h => h.includes('job') || h.includes('/jobs/'))).slice(0, 20)]
+() => {
+  const set = new Set([...document.querySelectorAll('a')]
+    .map(a => (a.href || '').split('#')[0])
+    .filter(h => h.includes('job') || h.includes('/jobs/')));
+  return [...set].slice(0, 20);
+}
 """)
             extra = page.evaluate("""
 () => {
