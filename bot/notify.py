@@ -1,6 +1,7 @@
 """Notifications: console + log file + Windows toast (plyer) + optional Telegram.
 
-Telegram token/chat_id come from .env or settings notify block.
+Telegram token/chat_id come from .env (auto-loaded below), real environment
+variables, or the settings notify block — checked in that order.
 """
 import datetime as dt
 import os
@@ -10,6 +11,22 @@ import requests
 
 ROOT = Path(__file__).resolve().parents[1]
 LOG_DIR = ROOT / "data" / "logs"
+
+
+def _load_env():
+    """Minimal .env loader: KEY=VALUE lines, # comments, real env vars win."""
+    env_path = ROOT / ".env"
+    if not env_path.exists():
+        return
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+
+_load_env()
 
 
 class Notifier:
