@@ -252,6 +252,24 @@ class BaseSiteBot:
         except Exception:
             return ""
 
+    def safe_html(self, page: Page, tag: str) -> str:
+        """Save the rendered DOM next to the screenshots — offline debugging
+        when a site changes its UI, plus regression-test fixtures."""
+        try:
+            SHOT_DIR.mkdir(parents=True, exist_ok=True)
+            path = SHOT_DIR / f"{self.name}_{tag}_{int(time.time())}.html"
+            html = (page.content() or "")[:800_000]
+            path.write_text(f"<!-- url: {page.url or ''} -->\n" + html,
+                            encoding="utf-8")
+            return str(path)
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _breaker_stepped(status: str, streak: int) -> int:
+        """Circuit breaker: count consecutive needs_you/failed outcomes."""
+        return streak + 1 if status in ("needs_you", "failed") else 0
+
     # ================================================================ apply
     def apply(self, page: Page, max_apps: int | None = None):
         """Main entry: walk the queue and submit applications."""
@@ -265,6 +283,9 @@ class BaseSiteBot:
         jobs = self.tracker.queued(source=self.name, limit=quota)
         self.notify.send(f"[{self.name}] apply run: {len(jobs)} queued, quota {quota}")
         done = 0
+        streak = 0
+        breaker = int((self.settings.get("limits", {}) or {}).get(
+            "circuit_breaker_streak", 3) or 0)
         for job in jobs:
             try:
                 window_closed = bool(page.is_closed())
@@ -279,6 +300,18 @@ class BaseSiteBot:
             if not self.in_business_hours():
                 self.notify.send(f"[{self.name}] outside business hours — stopping")
                 break
+            dup = self.tracker.find_cross_site_dup(
+                source=self.name, title=job["title"], company=job["company"],
+                score=job["score"], job_id=job["id"])
+            if dup:
+                why = (f"cross-site duplicate of #{dup['id']} "
+                       f"({dup['source']}, {dup['status']})")
+                self.tracker.set_status(job["id"], "skipped", why)
+                self.notify.send(f"[{self.name}] skipped duplicate: "
+                                 f"'{(job['title'] or '')[:44]}' = "
+                                 f"{dup['source']} #{dup['id']}")
+                done += 1
+                continue
             app_id = self.tracker.start_application(job["id"])
             try:
                 status, note, shot = self.apply_job(page, job)
@@ -297,9 +330,21 @@ class BaseSiteBot:
                     shot = self.safe_shot(page, f"err_{job['id']}")
             self.tracker.finish_application(app_id, status, note, shot)
             self.tracker.set_status(job["id"], status, note)
+            if status in ("needs_you", "failed"):
+                self.safe_html(page, f"{status}_{job['id']}")
             self.notify.send(f"[{self.name}] {status.upper()} — '{(job['title'] or '')[:48]}' "
                              f"@ {(job['company'] or '')[:20]}" + (f" | {note}" if note else ""))
             done += 1
+            streak = self._breaker_stepped(status, streak)
+            if breaker and streak >= breaker:
+                self.notify.send(
+                    f"[{self.name}] circuit breaker: {streak} jobs in a row did NOT "
+                    f"apply — stopping this run (site flow may have changed). "
+                    f"Fix, then: retry {self.name}", toast=True)
+                self.tracker.log_event(
+                    "run", f"[{self.name}] circuit breaker tripped after "
+                           f"{streak} consecutive non-applies")
+                break
             self.human_pause()
         self.notify.send(f"[{self.name}] apply run finished: {done} processed "
                          f"(applied today: {self.tracker.applied_today(self.name)})")

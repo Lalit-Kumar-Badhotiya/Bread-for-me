@@ -278,6 +278,33 @@ class Tracker:
             "|| ?) WHERE id=?", (f" | {text}", job_id))
         self.con.commit()
 
+    @staticmethod
+    def _norm_key(text: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+    def find_cross_site_dup(self, *, source: str, title: str, company: str,
+                            score: int, job_id: int):
+        """A copy of this same posting on ANOTHER site: either already applied
+        there (=> never re-apply) or a stronger queued copy we will apply to
+        instead. Returns the winning row or None. Never matches empty
+        company/title (too risky)."""
+        t = self._norm_key(title)
+        c = self._norm_key(company)
+        if not t or not c:
+            return None
+        rows = self.con.execute(
+            "SELECT id, source, title, company, score, status FROM jobs "
+            "WHERE source != ? AND status IN ('applied','queued')",
+            (source,)).fetchall()
+        for r in rows:
+            if self._norm_key(r["title"]) != t or self._norm_key(r["company"]) != c:
+                continue
+            if r["status"] == "applied":
+                return r
+            if r["score"] > score or (r["score"] == score and r["id"] < job_id):
+                return r
+        return None
+
     # ---------- events ----------
     def log_event(self, kind: str, message: str):
         self.con.execute("INSERT INTO events (ts, kind, message) VALUES (?,?,?)",

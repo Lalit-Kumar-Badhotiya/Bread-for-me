@@ -61,6 +61,9 @@ python run_apply.py retry naukri                    # requeue parked needs_you/f
 python run_apply.py retry indeed --id 123 --id 124  # or just specific rows
 python run_apply.py validate naukri                 # sweep top of queue for dead listings
 python run_apply.py reconcile                       # audit every applied row against the live site
+python run_apply.py run-all                         # every site in sequence, one summary
+python run_apply.py questions                       # answer parked screening questions (learns)
+python run_apply.py export --open                   # applied jobs -> CSV + HTML
 ```
 
 Idempotency guard: before clicking Apply the bot checks whether the site
@@ -74,6 +77,14 @@ flow has a wall-clock budget (`per_job_budget_sec` -> needs_you), and `run`
 sweeps the top of the queue for dead listings after each fetch. Unanswered
 screening questions from `--no-learn` runs are parked in
 `data/logs/unknown_questions.jsonl` for later batch-answering.
+A circuit breaker (`circuit_breaker_streak`) stops a run after N consecutive
+`needs_you`/`failed` jobs instead of burning through the whole queue. The
+apply loop skips near-duplicate cross-postings (same company+title on another
+site already applied to, or a stronger queued copy). `tracker.db` is backed up
+to `data/backups/` before mutating runs (newest 10 kept), zombie browser
+processes holding a site profile are cleared automatically at session start,
+and `needs_you`/`failed` pages are saved as HTML next to their screenshots
+(`data/logs/shots/`) for offline debugging.
 
 First 3–5 days: run `fetch` + `calibrate` only (no `apply`) and correct the
 queue — your rejects become new `exclude_keywords`. Then start `apply`.

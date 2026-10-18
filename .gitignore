@@ -7,10 +7,8 @@ config/answers.yaml
 __pycache__/
 *.pyc
 
-# Browser sessions (cookies/logins) and runtime artifacts
-data/state/
-data/logs/
-data/*.db
+# Runtime artifacts (browser sessions, logs, db, backups, exports)
+data/
 
 # Your real resume never goes into git
 resume/*.pdf
