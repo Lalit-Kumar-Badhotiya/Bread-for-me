@@ -168,7 +168,8 @@ class BaseSiteBot:
     name = "base"
     home = ""
     # subclass knobs ---------------------------------------------------------
-    NEXT_PATTERNS = [r"^next$", r"^continue$", r"^next step"]   # try BEFORE submit
+    NEXT_PATTERNS = [r"^next$", r"^continue$", r"^next step", r"^continue to",
+                     r"^save and continue$", r"^save & continue$", r"^proceed"]
     SUBMIT_PATTERNS = [r"^submit application$", r"^submit", r"^apply now$", r"^apply$"]
     APPLY_LOCATORS = ('button:has-text("Apply")', 'a:has-text("Apply")',
                       'button:has-text("Apply now")', 'a:has-text("Apply now")')
@@ -721,6 +722,7 @@ class BaseSiteBot:
             return self.chatbot_flow(page, jid)
         max_steps = int((self.settings.get("limits", {}) or {}).get("max_wizard_steps", 30))
         stall = 0
+        quiet = 0
         for _step in range(max_steps):
             target = self._resolve_form(page)
             progress = self._fill_pass(target)
@@ -735,6 +737,8 @@ class BaseSiteBot:
                 if stall > 2:
                     return ("needs_you", "partial: " + "; ".join(leftover[:3]),
                             self.safe_shot(page, f"stall_{jid}"))
+            if progress:
+                quiet = 0
             self.human_pause()
             clicked = self.click_matching(target, self.NEXT_PATTERNS)
             if not clicked:
@@ -751,11 +755,35 @@ class BaseSiteBot:
                 if self.external_apply_signal(page):
                     return ("needs_you", "external apply flow (company website)",
                             self.safe_shot(page, f"external_{jid}"))
+                # smartapply-style forms keep modules in nested frames and show
+                # transient screens ("Preparing review") — sweep every frame,
+                # then give slow states a few quiet retries before deciding.
+                swept = False
+                try:
+                    for fr in page.frames:
+                        if fr is target:
+                            continue
+                        if (self.click_matching(fr, self.NEXT_PATTERNS)
+                                or self.click_matching(fr, self.SUBMIT_PATTERNS)):
+                            swept = True
+                            break
+                except Exception:
+                    pass
+                if swept:
+                    page.wait_for_timeout(random.randint(1500, 3500))
+                    quiet = 0
+                    continue
+                allow = 8 if self._looks_loading(page) else 2
+                if quiet < allow:
+                    quiet += 1
+                    page.wait_for_timeout(5000)
+                    continue
                 if not leftover and not self._form_present(target):
-                    return ("applied", "form closed without confirmation",
-                            self.safe_shot(page, f"app_{jid}"))
+                    return ("needs_you", "form closed without confirmation — verify manually",
+                            self.safe_shot(page, f"verify_{jid}"))
                 return ("needs_you", "no next/submit button found",
                         self.safe_shot(page, f"nobtn_{jid}"))
+            quiet = 0
             page.wait_for_timeout(random.randint(1500, 3500))
             ph = (self._confirmation_phrase(page)
                   or self._confirmation_phrase_safe(target))
@@ -763,10 +791,21 @@ class BaseSiteBot:
                 return ("applied", f"confirmed: {ph or 'applied state'}",
                         self.safe_shot(page, f"app_{jid}"))
             if "submit" in str(clicked).lower():
+                # a slow confirmation may still be rendering; re-check briefly
+                for _ in range(3):
+                    page.wait_for_timeout(3000)
+                    t2 = self._resolve_form(page)
+                    ph = (self._confirmation_phrase(page)
+                          or self._confirmation_phrase_safe(t2))
+                    if ph or self.applied_signal(page):
+                        break
+                if ph or self.applied_signal(page):
+                    return ("applied", f"confirmed: {ph or 'applied state'}",
+                            self.safe_shot(page, f"app_{jid}"))
                 if not self._form_present(self._resolve_form(page)) \
                         and not self.required_leftover(self._resolve_form(page)):
-                    return ("applied", "submitted (form closed)",
-                            self.safe_shot(page, f"app_{jid}"))
+                    return ("needs_you", "submit clicked; no confirmation yet — "
+                            "verify manually", self.safe_shot(page, f"verify_{jid}"))
                 return ("needs_you", "verify submission manually",
                         self.safe_shot(page, f"verify_{jid}"))
         return ("needs_you", f"wizard exceeded {max_steps} steps",
@@ -790,6 +829,20 @@ class BaseSiteBot:
             return page.locator("input, select, textarea").count() >= 2
         except Exception:
             return False
+
+    LOADING_HINTS = ("preparing review", "loading", "please wait", "just a moment",
+                     "one moment", "hang tight", "preparing your")
+
+    def _looks_loading(self, page: Page) -> bool:
+        """Transient loading screens (smartapply "Preparing review") have no
+        form but are NOT a finished flow — they deserve a longer quiet wait."""
+        try:
+            t = page.inner_text("body").lower()
+        except Exception:
+            return False
+        if self._form_present(page):
+            return False
+        return any(h in t for h in self.LOADING_HINTS)
 
     # ========================================================= to subclass
     def fetch_new_jobs(self, page: Page) -> int:

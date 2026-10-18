@@ -137,6 +137,19 @@ def cmd_init(args):
     print(f"\nrecords so far: {len(tracker.queued(limit=None))} queued jobs in tracker")
 
 
+def _safe_close(ctx, pw):
+    """Shut the browser down without crashing the CLI (the user may have
+    closed the window/context mid-run — closing twice raises TargetClosed)."""
+    try:
+        ctx.close()
+    except Exception:
+        pass
+    try:
+        pw.stop()
+    except Exception:
+        pass
+
+
 def cmd_login(args):
     settings = load_yaml(CFG_DIR / "settings.yaml")
     _bot, tracker, notifier = get_bot(args.site)
@@ -149,8 +162,7 @@ def cmd_login(args):
         pass
     notifier.send(f"Browser open — log in to {args.site} manually now.", toast=True)
     input("When you are logged in (you can see your name/profile), press ENTER here... ")
-    ctx.close()
-    pw.stop()
+    _safe_close(ctx, pw)
     print(f"Session saved to data/state/{args.site} — future runs reuse it.")
 
 
@@ -167,8 +179,7 @@ def cmd_fetch(args):
         n = 0
         notifier.send(f"[{args.site}] fetch failed: {type(e).__name__}: {e}", toast=True)
     finally:
-        ctx.close()
-        pw.stop()
+        _safe_close(ctx, pw)
     queued = tracker.queued(source=args.site, limit=100000)
     notifier.send(f"[{args.site}] fetch done: {n} newly queued "
                   f"({len(queued)} in queue total)")
@@ -191,8 +202,7 @@ def cmd_apply(args):
     try:
         bot.apply(page, max_apps=args.max)
     finally:
-        ctx.close()
-        pw.stop()
+        _safe_close(ctx, pw)
 
 
 def cmd_run(args):
@@ -231,8 +241,7 @@ def cmd_run(args):
                        f"queue {len(queued)}"
                        + (f" | errors: {'; '.join(errors)}" if errors else ""))
     finally:
-        ctx.close()
-        pw.stop()
+        _safe_close(ctx, pw)
 
 
 def cmd_calibrate(args):
