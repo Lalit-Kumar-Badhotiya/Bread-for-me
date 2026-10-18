@@ -11,7 +11,7 @@ Login is email/password (do NOT use LinkedIn SSO — LinkedIn stays manual).
 import re
 import time
 
-from ..scorer import detail_verdict, score_job
+from ..scorer import score_job
 from .base import BaseSiteBot, Page, posted_date_from_text
 
 APPLY_LOCATORS = (
@@ -59,16 +59,6 @@ class WellfoundBot(BaseSiteBot):
     APPLY_LOCATORS = APPLY_LOCATORS
     SUBMIT_PATTERNS = [r"^submit application$", r"^submit$", r"^one.?click apply$"]
     EXTERNAL_APPLY_GUARD = True
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        if self.cfg.get("verify_on_detail"):
-            # Wellfound cards often omit experience and skills entirely, so
-            # those rows stay queued tentatively; apply_job() verifies the
-            # full job page and skips anything asking 1+ years or missing the
-            # must-have skills.
-            self.targets = dict(self.targets)
-            self.targets["verify_on_detail"] = True
 
     # ================================================================== FETCH
     def fetch_new_jobs(self, page: Page) -> int:
@@ -157,19 +147,10 @@ class WellfoundBot(BaseSiteBot):
         url = job["url"]
         page.goto(url, wait_until="domcontentloaded", timeout=45000)
         page.wait_for_timeout(2500)
-        # last checkpoint before submitting: the card may not have shown any
-        # experience info, so read the full page and drop experience-gated jobs
-        try:
-            text = page.evaluate(
-                "() => (document.body.innerText || '').slice(0, 12000)")
-        except Exception:
-            text = ""
-        if len((text or "").strip()) < 300:
-            return ("needs_you", "job page did not render (experience unverifiable)",
-                    self.safe_shot(page, f"blank_{job['id']}"))
-        ok, why = detail_verdict(text, self.targets)
-        if not ok:
-            return ("skipped", why, self.safe_shot(page, f"exp_{job['id']}"))
+        # last checkpoint before submitting (see BaseSiteBot.detail_gate)
+        gate = self.detail_gate(page, job)
+        if gate:
+            return gate
         apply_loc = self.find_apply(
             page, self.APPLY_LOCATORS,
             role_rx=re.compile(r"one.?click apply|^apply( now)?$", re.I))

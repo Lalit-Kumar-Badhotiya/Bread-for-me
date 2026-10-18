@@ -181,14 +181,20 @@ class Tracker:
     def reclassify(self, job_id: int, status: str, note: str = "") -> str | None:
         """Apply a fetch-time re-classification to an existing row, except for
         protected statuses (applied/needs_you), which a fetch must never
-        resurrect into the queue.
+        resurrect into the queue — and except apply-time detail-gate skips
+        (their note says "... detail page ..."), which a re-fetch must not
+        undo or the same rejected job would eat an apply slot every run.
 
         Returns the PREVIOUS status when written, or None when protected.
         """
-        row = self.con.execute("SELECT status FROM jobs WHERE id=?",
-                               (job_id,)).fetchone()
-        if row is not None and row["status"] in PROTECTED_STATUSES:
-            return None
+        row = self.con.execute(
+            "SELECT status, status_note FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if row is not None:
+            if row["status"] in PROTECTED_STATUSES:
+                return None
+            if (row["status"] == "skipped" and status == "queued"
+                    and "detail page" in (row["status_note"] or "")):
+                return None
         prior = row["status"] if row is not None else "discovered"
         self.set_status(job_id, status, note)
         return prior

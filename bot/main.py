@@ -94,14 +94,23 @@ def get_bot(site: str, extra_titles=None, *, settings=None, profile=None,
 
 
 def open_session(site: str, headless: bool):
-    """Launch persistent browser context; returns (playwright, context, page)."""
+    """Launch persistent browser context; returns (playwright, context, page).
+
+    settings.yaml may set sites.<site>.browser_channel ("chrome"/"msedge")
+    to run that site in the installed browser instead of bundled Chromium —
+    required for Cloudflare-protected sites like Indeed, which treat the
+    bundled browser as a bot however human the user's actions are.
+    """
     from playwright.sync_api import sync_playwright
     state = ROOT / "data" / "state" / site
     state.mkdir(parents=True, exist_ok=True)
+    settings = load_yaml(CFG_DIR / "settings.yaml")
+    channel = ((settings.get("sites") or {}).get(site) or {}).get("browser_channel")
     pw = sync_playwright().start()
+    extra = {"channel": channel} if channel else {}
     ctx = pw.chromium.launch_persistent_context(
         str(state), headless=headless,
-        args=["--disable-blink-features=AutomationControlled"])
+        args=["--disable-blink-features=AutomationControlled"], **extra)
     ctx.add_init_script(
         "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
     ctx.set_default_timeout(20000)
@@ -248,7 +257,10 @@ def cmd_rescore(args):
     notifier = Notifier(settings)
     from bot.scorer import rescore_pending
     before = len(tracker.queued(limit=None))
-    changed = rescore_pending(tracker, targets, settings)
+    # explicit command = user wants everything re-judged (also revives
+    # detail-gate skips after target edits)
+    changed = rescore_pending(tracker, targets, settings,
+                              revive_gate_skips=True)
     after = len(tracker.queued(limit=None))
     notifier.send(f"rescore: {changed} row(s) re-classified against current "
                   f"targets; queue {before} -> {after}")

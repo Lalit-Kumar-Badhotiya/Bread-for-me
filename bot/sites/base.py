@@ -190,6 +190,12 @@ class BaseSiteBot:
         self.notify = notifier
         self.force_hours = False   # set by the CLI when --force is passed
         self._leaf_index = _flatten(profile)
+        if self.cfg.get("verify_on_detail"):
+            # This site's listing cards omit experience/skills; score_job
+            # queues such rows tentatively and detail_gate() re-checks the
+            # full job page right before anything gets submitted.
+            self.targets = dict(self.targets)
+            self.targets["verify_on_detail"] = True
         SHOT_DIR.mkdir(parents=True, exist_ok=True)
 
     # ================================================================== quota
@@ -596,6 +602,16 @@ class BaseSiteBot:
             return True
         return any(h in content for h in self.CONFIRM_HINTS)
 
+    @staticmethod
+    def _host_family(host: str) -> str:
+        """Host normalized for same-site comparison (strips www + country label):
+        in.indeed.com -> indeed.com ; www.glassdoor.co.in -> glassdoor.co.in"""
+        h = re.sub(r"^www\.", "", (host or "").lower().split(":")[0])
+        labels = h.split(".")
+        if len(labels) >= 3 and len(labels[0]) == 2:
+            h = ".".join(labels[1:])
+        return h
+
     def applied_signal(self, page: Page) -> bool:
         """Site override: the page itself proves this job is (now) applied."""
         return False
@@ -633,12 +649,14 @@ class BaseSiteBot:
                         self.safe_shot(page, f"clickfail_{jid}"))
             page.wait_for_timeout(random.randint(1500, 3000))
             if self.EXTERNAL_APPLY_GUARD:
-                host = re.match(r"https?://([^/]+)", page.url or "").group(1) \
-                    if re.match(r"https?://", page.url or "") else ""
-                if host and re.sub(r"^www\.", "", host) != re.sub(r"^www\.", "",
-                                                                  self.home.split("//")[-1]):
-                    return ("needs_you", f"external apply flow ({host})",
-                            self.safe_shot(page, f"external_{jid}"))
+                m = re.match(r"https?://([^/]+)", page.url or "")
+                host = m.group(1) if m else ""
+                if host:
+                    fam = self._host_family(host)
+                    home_fam = self._host_family(self.home)
+                    if fam != home_fam and not fam.endswith("." + home_fam):
+                        return ("needs_you", f"external apply flow ({host})",
+                                self.safe_shot(page, f"external_{jid}"))
         if self._login_needed(page):
             if not self.await_manual_login(page):
                 return ("needs_you", "manual login required (timed out)",
@@ -646,7 +664,8 @@ class BaseSiteBot:
         self.dismiss_interstitial(page)
         if self.applied_signal(page):
             # e.g. Naukri 1-click apply: the click already submitted, page shows "Applied"
-            return ("applied", "applied state detected after click", "")
+            return ("applied", "applied state detected after click",
+                    self.safe_shot(page, f"app_{jid}"))
         if self.external_apply_signal(page):
             return ("needs_you", "external apply flow (company website)",
                     self.safe_shot(page, f"external_{jid}"))
@@ -678,22 +697,24 @@ class BaseSiteBot:
                     return self.chatbot_flow(page, jid)
                 if (self._at_confirmation(page) or self._at_confirmation_safe(target)
                         or self.applied_signal(page)):
-                    return ("applied", "", "")
+                    return ("applied", "", self.safe_shot(page, f"app_{jid}"))
                 if self.external_apply_signal(page):
                     return ("needs_you", "external apply flow (company website)",
                             self.safe_shot(page, f"external_{jid}"))
                 if not leftover and not self._form_present(target):
-                    return ("applied", "form closed without confirmation", "")
+                    return ("applied", "form closed without confirmation",
+                            self.safe_shot(page, f"app_{jid}"))
                 return ("needs_you", "no next/submit button found",
                         self.safe_shot(page, f"nobtn_{jid}"))
             page.wait_for_timeout(random.randint(1500, 3500))
             if (self._at_confirmation(page) or self._at_confirmation_safe(target)
                     or self.applied_signal(page)):
-                return ("applied", "", "")
+                return ("applied", "", self.safe_shot(page, f"app_{jid}"))
             if "submit" in str(clicked).lower():
                 if not self._form_present(self._resolve_form(page)) \
                         and not self.required_leftover(self._resolve_form(page)):
-                    return ("applied", "submitted (form closed)", "")
+                    return ("applied", "submitted (form closed)",
+                            self.safe_shot(page, f"app_{jid}"))
                 return ("needs_you", "verify submission manually",
                         self.safe_shot(page, f"verify_{jid}"))
         return ("needs_you", f"wizard exceeded {max_steps} steps",
@@ -731,6 +752,62 @@ class BaseSiteBot:
         self.notify.send(f"[{self.name}] rescore: {changed} rows re-classified "
                          "against current targets")
         return n
+
+    # ------------------------------------------------- pre-apply detail gate
+    def _page_text(self, page: Page) -> str:
+        try:
+            return page.evaluate(
+                "() => { const el = document.querySelector('#jobDescriptionText');"
+                " const t = (el && el.innerText) || (document.body && document.body.innerText) || '';"
+                " return t.slice(0, 15000); }") or ""
+        except Exception:
+            return ""
+
+    def detail_gate(self, page: Page, job) -> tuple[str, str, str] | None:
+        """Final check on the job page for verify_on_detail sites.
+
+        Those sites' listing cards hide experience and skills, so the hard
+        rules (band years, must-have skills) are re-run against the full
+        posting here, right before any application is submitted. Returns
+        None when the site doesn't need the gate (or everything checks out).
+        """
+        if not self.targets.get("verify_on_detail"):
+            return None
+        text = ""
+        # Cloudflare sometimes answers a job page with an "Additional
+        # Verification Required" interstitial; a short wait + reload usually
+        # lets it pass. Give it up to two reloads before giving up.
+        for attempt in range(3):
+            text = self._page_text(page)
+            if len((text or "").strip()) >= 300:
+                break
+            if attempt == 2:
+                break
+            try:
+                page.wait_for_timeout(5500)
+                page.reload(wait_until="domcontentloaded", timeout=45000)
+                page.wait_for_timeout(3000)
+            except Exception:
+                break
+        if len((text or "").strip()) < 300:
+            return ("needs_you", "job page did not render (details unverifiable)",
+                    self.safe_shot(page, f"blank_{job['id']}"))
+        # dead/expired listings must not be judged by their 404 chrome
+        try:
+            title_l = (page.title() or "").lower()
+        except Exception:
+            title_l = ""
+        low = (text or "").lower()
+        if ("job is ooo" in low or "it's not here" in low
+                or any(k in title_l for k in ("not found", "job is ooo",
+                                              "expired", "no longer available"))):
+            return ("skipped", "listing is dead (not-found/expired page)",
+                    self.safe_shot(page, f"dead_{job['id']}"))
+        from ..scorer import detail_verdict
+        ok, why = detail_verdict(text, self.targets)
+        if not ok:
+            return ("skipped", why, self.safe_shot(page, f"exp_{job['id']}"))
+        return None
 
     def apply_job(self, page: Page, job) -> tuple[str, str, str]:
         raise NotImplementedError

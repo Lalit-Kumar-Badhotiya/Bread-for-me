@@ -121,11 +121,12 @@ def score_job(title, company, location, description, posted_date, targets):
 
     title_l = (title or "").lower()
 
-    # 1) title match — weights adapt: without must-have skills configured the
+    # 1) title match — weights adapt: without a skills gate configured the
     #    title alone carries more weight so the threshold stays reachable.
     must_cfg = [s.lower() for s in _norm_list(targets.get("must_have_skills"))]
+    any_cfg = [s.lower() for s in _norm_list(targets.get("must_have_any"))]
     titles = [t.lower() for t in _norm_list(targets.get("titles"))]
-    title_weight = 40 if must_cfg else 62
+    title_weight = 40 if (must_cfg or any_cfg) else 62
     if titles:
         if any(t in title_l for t in titles):
             score += title_weight
@@ -137,19 +138,29 @@ def score_job(title, company, location, description, posted_date, targets):
                     reasons.append(f"title: loose ({t})")
                     break
 
-    # 2) must-have skills — ALL required (when configured). Sites with
-    #    verify_on_detail list cards that omit skills entirely; those only see
-    #    the final check on the job page right before applying.
-    missing = [s for s in must_cfg if s not in blob]
-    if must_cfg:
-        if missing and not targets.get("verify_on_detail"):
-            return 0, reasons + [f"missing must-have: {missing[0]}", "..."], True
+    # 2) skills gate — must_have_skills = ALL required, must_have_any = at
+    #    least ONE of. Sites with verify_on_detail list cards that omit
+    #    skills entirely; those only see the final check on the job page
+    #    right before applying.
+    missing_all = [s for s in must_cfg if s not in blob]
+    missing_any = [s for s in any_cfg if s not in blob]
+    any_failed = bool(any_cfg) and len(missing_any) == len(any_cfg)
+    if must_cfg or any_cfg:
+        if not targets.get("verify_on_detail"):
+            if missing_all:
+                return 0, reasons + [f"missing must-have: {missing_all[0]}", "..."], True
+            if any_failed:
+                return 0, reasons + [
+                    f"missing must-have: any of {', '.join(any_cfg[:5])}", "..."], True
         score += 40
-        if missing:
-            reasons.append(f"skills: '{missing[0]}' not shown on the card - "
+        if missing_all:
+            reasons.append(f"skills: '{missing_all[0]}' not shown on the card - "
                            "verify on the detail page")
+        elif any_failed:
+            reasons.append(f"skills: none of {', '.join(any_cfg[:5])} shown on "
+                           "the card - verify on the detail page")
         else:
-            reasons.append(f"must-have skills: all {len(must_cfg)}")
+            reasons.append("must-have skills: ok")
 
     # 3) bonus skills
     bonus = [s.lower() for s in _norm_list(targets.get("bonus_skills"))]
@@ -216,14 +227,19 @@ def detail_verdict(text: str, targets: dict) -> tuple[bool, str]:
     if not ok:
         return False, why
     blob = (text or "").lower()
-    missing = [s.lower() for s in _norm_list(targets.get("must_have_skills"))
-               if s.lower() not in blob]
+    must_cfg = [s.lower() for s in _norm_list(targets.get("must_have_skills"))]
+    any_cfg = [s.lower() for s in _norm_list(targets.get("must_have_any"))]
+    missing = [s for s in must_cfg if s not in blob]
     if missing:
         return False, f"skills: detail page never mentions must-have '{missing[0]}'"
+    if any_cfg and all(s not in blob for s in any_cfg):
+        return False, ("skills: detail page mentions none of "
+                       + ", ".join(any_cfg[:5]))
     return True, why
 
 
-def rescore_pending(tracker, targets, settings=None) -> int:
+def rescore_pending(tracker, targets, settings=None,
+                    revive_gate_skips: bool = False) -> int:
     """Re-evaluate every pending row against the CURRENT targets.yaml.
 
     Keeps the queue honest when you edit targets between runs: jobs you now
@@ -233,12 +249,18 @@ def rescore_pending(tracker, targets, settings=None) -> int:
 
     Sites with `verify_on_detail: true` in settings keep rows whose cards
     omit experience/skills queued (the detail-page check runs right before
-    applying).
+    applying). Rows that were skipped BY that detail check stay skipped
+    unless revive_gate_skips is set: an automatic run must not refill the
+    queue with pages already known to want 1+ years or to lack a must-have,
+    while the explicit `rescore` command may revive them after target edits.
     """
     sites_cfg = (settings or {}).get("sites") or {}
     min_score = int(targets.get("min_score", 70))
     changed = 0
     for row in tracker.rescorable_rows():
+        if (not revive_gate_skips and row["status"] == "skipped"
+                and "detail page" in (row["status_note"] or "")):
+            continue
         t = targets
         if (sites_cfg.get(row["source"]) or {}).get("verify_on_detail"):
             t = dict(targets)

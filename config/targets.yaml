@@ -17,7 +17,8 @@ titles:
   - SDE Intern
   - Software Engineer Intern
 
-must_have_skills: [javascript]  # from resume — posting must mention JS somewhere (all listed skills are required; keep this list short)
+must_have_skills: []  # AND-gate: posting must mention EVERY listed skill (empty = off)
+must_have_any: [javascript, typescript, node, react, express, next.js, nextjs]  # OR-gate from resume: posting must mention at least one of these
 
 bonus_skills:
   - python
@@ -38,6 +39,7 @@ bonus_skills:
 
 exclude_keywords:
   - senior
+  - sr
   - staff
   - lead
   - manager

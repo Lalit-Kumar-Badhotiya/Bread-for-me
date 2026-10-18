@@ -141,6 +141,9 @@ class IndeedGroupBot(BaseSiteBot):
         url = job["url"]
         page.goto(url, wait_until="domcontentloaded", timeout=45000)
         page.wait_for_timeout(2500)
+        gate = self.detail_gate(page, job)
+        if gate:
+            return gate
         apply_loc = self.find_apply(
             page, self.APPLY_LOCATORS,
             role_rx=re.compile(r"^apply( now)?$", re.I))
@@ -241,7 +244,8 @@ class GlassdoorBot(IndeedGroupBot):
   const out = new Map();
   document.querySelectorAll('a[href*="/job-listing/"]').forEach(a => {
     const raw = a.href || a.getAttribute('href') || '';
-    const clean = (raw.startsWith('http') ? raw : location.origin + raw).split('?')[0];
+    // KEEP the query string — /job-listing/ pages 404 without jobListingId
+    const clean = (raw.startsWith('http') ? raw : location.origin + raw).split('#')[0];
     if (out.has(clean)) return;
     let box = '';
     try {
