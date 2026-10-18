@@ -17,16 +17,23 @@ titles:
   - SDE Intern
   - Software Engineer Intern
 
-must_have_skills: []     # title-driven targeting; add e.g. [python] to tighten
+must_have_skills: [javascript]  # from resume — posting must mention JS somewhere (all listed skills are required; keep this list short)
 
 bonus_skills:
   - python
   - java
   - javascript
+  - typescript
   - sql
   - rest api
   - node
   - react
+  - next.js
+  - nextjs
+  - express
+  - postgres
+  - mongodb
+  - docker
   - git
 
 exclude_keywords:
@@ -36,6 +43,7 @@ exclude_keywords:
   - architect
   - principal
   - director
+  - unpaid
   - "12+ years"
   - "10+ years"
 
@@ -52,5 +60,5 @@ locations:               # "delhi" also matches New Delhi/Gurugram/Noida via sub
   - remote
 
 min_score: 65            # queue threshold; drop to 60-65 if queue feels too small
-experience_band: fresher # fresher=0-1, junior=0-3, mid=2-5 (posts above band rejected)
-max_age_days: 7
+experience_band: junior  # fresher=0-1, junior=0-3, mid=2-5 (posts above band rejected)
+max_age_days: 14
