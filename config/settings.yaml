@@ -1,0 +1,36 @@
+# ============================================================
+#  GLOBAL SETTINGS — tune behavior without touching code
+#  Load distribution: naukri is the volume engine, wellfound for
+#  startups, the indeed group shares one conservative budget
+#  (they run the same backend/anti-bot), linkedin stays MANUAL.
+# ============================================================
+
+run:
+  business_hours_only: true
+  start_hour: 9        # applications happen between 9:00 and 19:00 local
+  end_hour: 19
+  headless: false      # keep false so you can watch + intervene on CAPTCHA/OTP
+
+pacing:
+  min_action_delay_sec: 4   # human-like random pauses between form actions
+  max_action_delay_sec: 10
+
+limits:
+  daily_total_cap: 20       # all sites combined (raises as trust builds)
+  max_wizard_steps: 30      # safety stop inside an apply flow
+  login_manual_wait_min: 10 # how long to wait while you log in manually
+
+# Daily caps per site. enabled=false = skipped; flip on phase by phase.
+sites:
+  naukri:      { enabled: true,  daily_cap: 10, max_titles_per_run: 3 }
+  wellfound:   { enabled: false, daily_cap: 6 }
+  indeed:      { enabled: false, daily_cap: 5 }
+  glassdoor:   { enabled: false, daily_cap: 4 }
+  simplyhired: { enabled: false, daily_cap: 3 }
+  linkedin:    { enabled: false, daily_cap: 0, mode: "manual" }  # NEVER automated
+
+notify:
+  # optional Telegram pings; leave empty for desktop notifications only.
+  # Set real values in .env as TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID
+  telegram_bot_token: ""
+  telegram_chat_id: ""

@@ -1,0 +1,18 @@
+# Copy me to config/answers.yaml (real file is gitignored once you start answering).
+# The bot learns new question/answer pairs automatically after you answer them once.
+
+pairs:
+  - q: "Are you legally authorized to work in India?"
+    a: "Yes"
+  - q: "Will you now or in the future require sponsorship?"
+    a: "No"
+  - q: "Are you willing to relocate?"
+    a: "{{willing_to_relocate}}"
+  - q: "What is your expected salary?"
+    a: "{{expected_salary}}"
+  - q: "What is your notice period?"
+    a: "{{notice_period}}"
+
+blobs:
+  cover_letter: "{{cover_letter}}"
+  resume_headline: "{{resume_headline}}"

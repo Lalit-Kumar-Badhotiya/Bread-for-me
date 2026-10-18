@@ -1,0 +1,19 @@
+# Personal data — NEVER commit. Templates (.example) are tracked instead.
+config/profile.yaml
+config/answers.yaml
+
+# Local environment & runtime data — never commit
+.venv/
+__pycache__/
+*.pyc
+
+# Browser sessions (cookies/logins) and runtime artifacts
+data/state/
+data/logs/
+data/*.db
+
+# Your real resume never goes into git
+resume/*.pdf
+
+# Secrets
+.env

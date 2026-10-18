@@ -1,0 +1,16 @@
+# ============================================================
+#  TARGETING — decides WHICH jobs get applied to.
+#  Every posting is scored; only jobs >= min_score are queued.
+#  First 3-5 days: run in calibrate mode and tune these until
+#  the queue looks right, THEN enable auto-apply.
+# ============================================================
+
+titles: []               # exact/subtitle matches, e.g. ["Data Analyst", "Business Analyst", "MIS Executive"]
+must_have_skills: []     # ALL of these must appear in the posting, sensibly small, e.g. [sql, excel]
+bonus_skills: []         # each found adds points, e.g. [python, "power bi", tableau]
+exclude_keywords: []     # instant reject, e.g. ["senior", "lead", "manager", "unpaid", "commission"]
+
+locations: []            # e.g. [hyderabad, bangalore, remote]
+                         # "remote" also matches postings that mention remote/work from home
+min_score: 70            # 0-100 threshold
+max_age_days: 7          # fresh postings only (skip stale reposts)

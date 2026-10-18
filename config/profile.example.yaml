@@ -1,0 +1,32 @@
+# Copy me to config/profile.yaml and fill in (that real file is gitignored).
+# Structure used by every site bot to fill forms.
+
+personal:
+  first_name: ""
+  last_name: ""
+  email: ""
+  phone: ""
+  city: ""
+  country: "India"
+  linkedin: ""
+  portfolio: ""
+
+education:
+  highest_degree: ""
+  university: ""
+  graduation_year: 2024
+
+experience:
+  years_total: 0
+  currently_employed: "no"
+  notice_period: "Immediately"
+  expected_salary: ""
+  willing_to_relocate: "yes"
+
+work_auth:
+  legally_authorized: "yes"
+  require_sponsorship: "no"
+
+extras:
+  resume_headline: ""
+  cover_letter: ""
