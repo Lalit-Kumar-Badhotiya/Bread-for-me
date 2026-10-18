@@ -160,8 +160,8 @@ class NaukriBot(BaseSiteBot):
             posted_date=posted,
             score=score, score_reasons="; ".join(reasons), status=status)
         if not is_new:
-            self.tracker.set_status(jid, status, "; ".join(reasons)[:200])
-            return status == "queued"  # re-classified: counts when (re)queued
+            prior = self.tracker.reclassify(jid, status, "; ".join(reasons)[:200])
+            return bool(prior not in (None, "queued") and status == "queued")
         return status == "queued"
 
     # ================================================================== APPLY

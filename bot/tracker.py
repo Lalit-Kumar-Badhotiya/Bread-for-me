@@ -49,9 +49,15 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_source ON jobs(source);
+CREATE INDEX IF NOT EXISTS idx_jobs_updated ON jobs(updated_at);
 """
 
 STATUSES = ("discovered", "queued", "skipped", "applied", "needs_you", "failed")
+
+# Re-fetching a search page re-surfaces jobs already handled. These two must
+# never be re-queued by a fetch: applied = never apply twice, needs_you = the
+# human's turn (not the bot's).
+PROTECTED_STATUSES = ("applied", "needs_you")
 
 
 def now() -> str:
@@ -79,17 +85,28 @@ class Tracker:
         self.con.commit()
 
     # ---------- jobs ----------
-    def _fuzzy_id(self, company: str, title: str, location: str):
+    def _fuzzy_id(self, company: str, title: str, location: str, days: int = 90):
         """Cross-site tolerance pass: per-site parses differ slightly
-        (punctuation, extra words) but it is the SAME job. Merge those."""
+        (punctuation, extra words) but it is the SAME job. Merge those.
+
+        Bounded for speed: only rows updated in the last `days` days are
+        compared (a cross-post twin is always re-fetched around the same
+        time), and length-mismatched titles are skipped before the expensive
+        similarity check (`ratio >= 0.90` is impossible beyond ~11% length
+        difference).
+        """
         nt, nc = norm_text(title), norm_text(company)
         nloc = norm_text(location)
         loc_tok = nloc.split()[0] if nloc.split() else ""
         if not nt:
             return None
+        cutoff = (dt.datetime.now() - dt.timedelta(days=days)).isoformat()
         for r in self.con.execute(
-                "SELECT id,title,company,location FROM jobs").fetchall():
+                "SELECT id,title,company,location FROM jobs WHERE updated_at >= ?",
+                (cutoff,)).fetchall():
             rt, rc = norm_text(r["title"]), norm_text(r["company"])
+            if rt and abs(len(rt) - len(nt)) > max(3, len(nt) // 4):
+                continue
             same_t = rt == nt \
                 or difflib.SequenceMatcher(None, rt, nt).ratio() >= 0.90
             if not same_t:
@@ -160,6 +177,21 @@ class Tracker:
             "UPDATE jobs SET status=?, status_note=?, updated_at=? WHERE id=?",
             (status, note, now(), job_id))
         self.con.commit()
+
+    def reclassify(self, job_id: int, status: str, note: str = "") -> str | None:
+        """Apply a fetch-time re-classification to an existing row, except for
+        protected statuses (applied/needs_you), which a fetch must never
+        resurrect into the queue.
+
+        Returns the PREVIOUS status when written, or None when protected.
+        """
+        row = self.con.execute("SELECT status FROM jobs WHERE id=?",
+                               (job_id,)).fetchone()
+        if row is not None and row["status"] in PROTECTED_STATUSES:
+            return None
+        prior = row["status"] if row is not None else "discovered"
+        self.set_status(job_id, status, note)
+        return prior
 
     def queued(self, source: str | None = None, limit: int | None = None):
         q = "SELECT * FROM jobs WHERE status='queued'"

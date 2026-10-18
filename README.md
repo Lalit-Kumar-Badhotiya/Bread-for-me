@@ -44,11 +44,16 @@ python -m venv .venv
 ```powershell
 # look at what would be queued, tune targets.yaml until it looks right:
 python run_apply.py calibrate naukri
+# after editing targets.yaml, re-filter the existing queue instantly (no browser):
+python run_apply.py rescore
 # fetch + apply in one go (capped, business hours, headed browser):
 python run_apply.py run naukri
 # or separately:
 python run_apply.py fetch naukri
 python run_apply.py apply naukri --max 5
+# stuck on an unknown screening question? the bot asks you in the terminal,
+# saves the answer to answers.yaml, and retries that application automatically
+# (use --no-learn with apply/run to disable this for unattended runs)
 # stats:
 python run_apply.py report
 ```

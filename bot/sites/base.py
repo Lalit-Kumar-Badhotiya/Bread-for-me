@@ -246,6 +246,14 @@ class BaseSiteBot:
         self.notify.send(f"[{self.name}] apply run: {len(jobs)} queued, quota {quota}")
         done = 0
         for job in jobs:
+            try:
+                window_closed = bool(page.is_closed())
+            except Exception:
+                window_closed = False
+            if window_closed:
+                self.notify.send(f"[{self.name}] browser window was closed — stopping; "
+                                 "remaining jobs stay queued")
+                break
             if not self.quota_left():
                 break
             if not self.in_business_hours():
@@ -259,6 +267,14 @@ class BaseSiteBot:
                 shot = self.safe_shot(page, f"err_{job['id']}")
                 self.notify.send(f"[{self.name}] EXCEPTION on '{(job['title'] or '')[:40]}': {e}",
                                  toast=True)
+            if status == "needs_you" and self._learn_from_leftover(job, note):
+                self.notify.send(f"[{self.name}] retrying '{(job['title'] or '')[:40]}' "
+                                 "with the freshly learned answer(s)")
+                try:
+                    status, note, shot = self.apply_job(page, job)
+                except Exception as e:
+                    status, note = "failed", f"exception on retry: {type(e).__name__}: {e}"
+                    shot = self.safe_shot(page, f"err_{job['id']}")
             self.tracker.finish_application(app_id, status, note, shot)
             self.tracker.set_status(job["id"], status, note)
             self.notify.send(f"[{self.name}] {status.upper()} — '{(job['title'] or '')[:48]}' "
@@ -267,6 +283,47 @@ class BaseSiteBot:
             self.human_pause()
         self.notify.send(f"[{self.name}] apply run finished: {done} processed "
                          f"(applied today: {self.tracker.applied_today(self.name)})")
+
+    # ==================================================== screener learning
+    def _learn_from_leftover(self, job, note: str) -> bool:
+        """The wizard got stuck on unknown required inputs: ask the user right
+        here in the terminal, save each answer into the answer library
+        (answers.yaml), and tell the caller a retry is worthwhile.
+
+        Returns True when at least one answer was learned (=> the apply step
+        is retried once). Blank answers skip; Ctrl+C/EOF just stops learning.
+        Set run.interactive_learning: false (or --no-learn) for unattended runs.
+        """
+        if not (self.settings.get("run", {}) or {}).get("interactive_learning", True):
+            return False
+        note = note or ""
+        for prefix in ("needs your input: ", "partial: "):
+            if note.startswith(prefix):
+                questions = [q.strip() for q in note[len(prefix):].split(";") if q.strip()]
+                break
+        else:
+            return False
+        if not questions:
+            return False
+        print(f"\n[{self.name}] wizard is stuck on unknown screening question(s) for "
+              f"'{(job['title'] or '')[:56]}' @ {(job['company'] or '')[:24]}':")
+        learned = 0
+        try:
+            for q in questions:
+                clean = re.sub(r"\s*\[radio\]\s*$", "", q)
+                if self.answers.match(clean):
+                    continue  # answer is known; the widget itself failed us instead
+                extra = " (one of the option texts)" if clean != q else ""
+                ans = input(f"  Q: {clean}{extra}\n  A (blank = skip): ").strip()
+                if not ans:
+                    continue
+                self.answers.learn(clean, ans)
+                learned += 1
+                self.notify.send(f"[{self.name}] learned screener: {clean[:70]!r} "
+                                 f"-> {ans[:60]!r}")
+        except (EOFError, KeyboardInterrupt):
+            print("\n  (learning skipped — this run continues as-is)")
+        return learned > 0
 
     # ==================================================== profile mapping
     def profile_value_for(self, context: str) -> str | None:
@@ -641,23 +698,11 @@ class BaseSiteBot:
     def rescore_existing(self) -> int:
         """Re-evaluate every pending row against the CURRENT targets.yaml.
 
-        Keeps the queue honest when you edit targets between runs: jobs you
-        now exclude drop out, jobs that now qualify (older fetches say) come
-        in. Applied/needs_you/failed rows are never touched.
+        Delegates to scorer.rescore_pending (shared with the `rescore` CLI
+        command so both paths behave identically).
         """
-        min_score = int(self.targets.get("min_score", 70))
-        changed = 0
-        from ..scorer import score_job
-        for row in self.tracker.rescorable_rows():
-            score, reasons, reject = score_job(
-                row["title"], row["company"], row["location"],
-                row["description"], row["posted_date"] or "", self.targets)
-            status = "skipped" if (reject or score < min_score) else "queued"
-            if status != row["status"] or score != row["score"]:
-                self.tracker.rescore(row["id"], score, "; ".join(reasons)[:200],
-                                     status, "rescored against updated targets")
-                changed += 1
-        return changed
+        from ..scorer import rescore_pending
+        return rescore_pending(self.tracker, self.targets)
 
     def fetch_and_rescore(self, page: Page) -> int:
         n = self.fetch_new_jobs(page)

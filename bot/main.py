@@ -7,6 +7,7 @@ Commands:
   apply SITE      submit queued jobs in the browser (quota-capped)
   run SITE        fetch + apply in one go
   calibrate SITE  show the current queue so you can tune targets.yaml
+  rescore         re-apply current targets.yaml to the existing queue (no browser)
   report          today's stats across sites
 """
 import argparse
@@ -169,6 +170,8 @@ def cmd_apply(args):
     bot, tracker, notifier = get_bot(args.site, settings=settings, profile=profile,
                                      targets=targets, answers_lib=answers,
                                      tracker=tracker, notifier=notifier)
+    if getattr(args, "no_learn", False):
+        bot.settings.setdefault("run", {})["interactive_learning"] = False
     if not bot.in_business_hours() and not args.force:
         print("Outside business hours (settings.run) — use --force to override.")
         sys.exit(3)
@@ -187,6 +190,8 @@ def cmd_run(args):
                                       settings=settings, profile=profile,
                                       targets=targets, answers_lib=answers,
                                       tracker=tracker, notifier=notifier)
+    if getattr(args, "no_learn", False):
+        bot.settings.setdefault("run", {})["interactive_learning"] = False
     if getattr(args, "min_score", None) is not None:
         bot.targets["min_score"] = int(args.min_score)
     if not bot.in_business_hours() and not args.force:
@@ -194,13 +199,24 @@ def cmd_run(args):
         sys.exit(3)
     headless = bool(settings.get("run", {}).get("headless", False))
     pw, ctx, page = open_session(args.site, headless)
+    errors: list[str] = []
     try:
-        n = bot.fetch_and_rescore(page)
-        bot.apply(page, max_apps=args.max)
+        try:
+            n = bot.fetch_and_rescore(page)
+        except Exception as e:
+            n = 0
+            errors.append(f"fetch: {type(e).__name__}: {e}")
+            notifier2.send(f"[{args.site}] fetch failed: {type(e).__name__}: {e}", toast=True)
+        try:
+            bot.apply(page, max_apps=args.max)
+        except Exception as e:
+            errors.append(f"apply: {type(e).__name__}: {e}")
+            notifier2.send(f"[{args.site}] apply crashed: {type(e).__name__}: {e}", toast=True)
         queued = tracker.queued(source=args.site, limit=100000)
         notifier2.send(f"[{args.site}] run done: fetched {n}, "
                        f"applied today {tracker.applied_today(args.site)}, "
-                       f"queue {len(queued)}")
+                       f"queue {len(queued)}"
+                       + (f" | errors: {'; '.join(errors)}" if errors else ""))
     finally:
         ctx.close()
         pw.stop()
@@ -218,6 +234,20 @@ def cmd_calibrate(args):
         print(f"  {r['score']:>3}  {r['title'][:52]:<52} @ {(r['company'] or '')[:18]:<18}"
               f"  {r['url']}")
         print(f"      why: {r['score_reasons'][:150]}")
+
+
+def cmd_rescore(args):
+    """Re-apply current targets.yaml to every queued/skipped row (no browser)."""
+    settings = load_yaml(CFG_DIR / "settings.yaml")
+    targets = load_yaml(CFG_DIR / "targets.yaml")
+    tracker = Tracker()
+    notifier = Notifier(settings)
+    from bot.scorer import rescore_pending
+    before = len(tracker.queued(limit=None))
+    changed = rescore_pending(tracker, targets)
+    after = len(tracker.queued(limit=None))
+    notifier.send(f"rescore: {changed} row(s) re-classified against current "
+                  f"targets; queue {before} -> {after}")
 
 
 def cmd_report(args):
@@ -252,6 +282,8 @@ def main():
     p = sub.add_parser("apply"); p.add_argument("site")
     p.add_argument("--max", type=int, default=None, help="cap apps this run")
     p.add_argument("--force", action="store_true", help="ignore business hours")
+    p.add_argument("--no-learn", action="store_true",
+                   help="don't prompt for unknown screening questions")
     p.set_defaults(fn=cmd_apply)
 
     p = sub.add_parser("run"); p.add_argument("site")
@@ -259,11 +291,17 @@ def main():
     p.add_argument("--max", type=int, default=None)
     p.add_argument("--force", action="store_true")
     p.add_argument("--min-score", type=int, default=None)
+    p.add_argument("--no-learn", action="store_true",
+                   help="don't prompt for unknown screening questions")
     p.set_defaults(fn=cmd_run)
 
     p = sub.add_parser("calibrate"); p.add_argument("site")
     p.add_argument("--limit", type=int, default=25)
     p.set_defaults(fn=cmd_calibrate)
+
+    sub.add_parser("rescore",
+                   help="re-apply targets.yaml to the existing queue (no browser)"
+                   ).set_defaults(fn=cmd_rescore)
 
     sub.add_parser("report").set_defaults(fn=cmd_report)
 

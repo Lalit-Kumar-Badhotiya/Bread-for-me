@@ -60,5 +60,10 @@ locations:               # "delhi" also matches New Delhi/Gurugram/Noida via sub
   - remote
 
 min_score: 65            # queue threshold; drop to 60-65 if queue feels too small
-experience_band: junior  # fresher=0-1, junior=0-3, mid=2-5 (posts above band rejected)
+experience_band: fresher  # ZERO-experience policy: any posting stating 1+ required
+                          # years ("3-6 Yrs", "3 years of experience", "3+ yrs"...)
+                          # is rejected. fresher=0, junior=3, mid=5
+fresher_signal_required: true  # strict: only queue postings that explicitly target
+                               # zero-experience candidates (says fresher / "0-x Yrs" /
+                               # entry level / trainee / graduate / intern / no experience)
 max_age_days: 14

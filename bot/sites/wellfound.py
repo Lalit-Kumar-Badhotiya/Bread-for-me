@@ -122,17 +122,19 @@ class WellfoundBot(BaseSiteBot):
             if l.lower() in ("remote",) or ("·" in l) or re.search(r" India|bengal|mumbai|delhi|hyder|chennai|pune|gurug|noida", l, re.I):
                 location = re.sub(r"[·•]", ",", l).strip()[:80]
                 break
+        posted = posted_date_from_text(raw)
         score, reasons, reject = score_job(title, company, location, raw,
-                                           posted_date_from_text(raw), self.targets)
+                                           posted, self.targets)
         min_score = int(self.targets.get("min_score", 70))
         status = "skipped" if (reject or score < min_score) else "queued"
         job_id = url.rstrip("/").rsplit("/", 1)[-1]
         jid, is_new = self.tracker.upsert_job(
             source=self.name, source_job_id=job_id, url=url, title=title,
-            company=company, location=location, description=raw, posted_date="",
+            company=company, location=location, description=raw, posted_date=posted,
             score=score, score_reasons="; ".join(reasons), status=status)
         if not is_new:
-            self.tracker.set_status(jid, status, "; ".join(reasons)[:200])
+            prior = self.tracker.reclassify(jid, status, "; ".join(reasons)[:200])
+            return bool(prior not in (None, "queued") and status == "queued")
         return status == "queued"
 
     # ================================================================== APPLY

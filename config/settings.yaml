@@ -10,6 +10,9 @@ run:
   start_hour: 9        # applications happen between 9:00 and 19:00 local
   end_hour: 19
   headless: false      # keep false so you can watch + intervene on CAPTCHA/OTP
+  interactive_learning: true  # wizard stuck on an unknown screening question? ask
+                              # in the terminal, save it to answers.yaml, retry once
+                              # (disable per-run with --no-learn for unattended runs)
 
 pacing:
   min_action_delay_sec: 4   # human-like random pauses between form actions
