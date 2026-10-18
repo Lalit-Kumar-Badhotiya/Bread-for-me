@@ -315,6 +315,11 @@ class BaseSiteBot:
         except Exception:
             return []
 
+    def _resolve_form(self, page: Page):
+        """Where the apply form actually lives: main page by default; sites
+        whose apply flow is embedded in a child iframe override this."""
+        return page
+
     @staticmethod
     def _selector(cell: dict) -> str:
         if cell.get("id"):
@@ -484,8 +489,7 @@ class BaseSiteBot:
                 self.human_pause(1.5, 3.5)
         return progress
 
-    def _login_needed(self, page: Page) -> bool:
-        try:
+    def _login_needed(self, page: Page) -> bool:        try:
             if re.search(LOGIN_URL_RX, (page.url or "")):
                 return True
             return page.locator("input[type=password]:visible").count() > 0
@@ -529,7 +533,12 @@ class BaseSiteBot:
         return any(h in content for h in self.CONFIRM_HINTS)
 
     def wizard(self, page: Page, jid, apply_loc) -> tuple[str, str, str]:
-        """Generic apply flow from the Apply click to submission/confirmation."""
+        """Generic apply flow from the Apply click to submission/confirmation.
+
+        `page` = the root page (screenshots, url checks, confirm scans);
+        the actual form target is resolved per-iteration via _resolve_form()
+        so iframe-hosted flows work too.
+        """
         if apply_loc:
             try:
                 apply_loc.click(timeout=5000)
@@ -551,10 +560,11 @@ class BaseSiteBot:
         max_steps = int((self.settings.get("limits", {}) or {}).get("max_wizard_steps", 30))
         stall = 0
         for _step in range(max_steps):
-            progress = self._fill_pass(page)
-            self.tick_declarations(page)
-            self.upload_resume_once(page)
-            leftover = self.required_leftover(page)
+            target = self._resolve_form(page)
+            progress = self._fill_pass(target)
+            self.tick_declarations(target)
+            self.upload_resume_once(target)
+            leftover = self.required_leftover(target)
             if leftover and not progress:
                 return ("needs_you", "needs your input: " + "; ".join(leftover[:4]),
                         self.safe_shot(page, f"stuck_{jid}"))
@@ -564,26 +574,34 @@ class BaseSiteBot:
                     return ("needs_you", "partial: " + "; ".join(leftover[:3]),
                             self.safe_shot(page, f"stall_{jid}"))
             self.human_pause()
-            clicked = self.click_matching(page, self.NEXT_PATTERNS)
+            clicked = self.click_matching(target, self.NEXT_PATTERNS)
             if not clicked:
-                clicked = self.click_matching(page, self.SUBMIT_PATTERNS)
+                clicked = self.click_matching(target, self.SUBMIT_PATTERNS)
             if not clicked:
-                if self._at_confirmation(page):
+                if self._at_confirmation(page) or self._at_confirmation_safe(target):
                     return ("applied", "", "")
-                if not leftover and not self._form_present(page):
+                if not leftover and not self._form_present(target):
                     return ("applied", "form closed without confirmation", "")
                 return ("needs_you", "no next/submit button found",
                         self.safe_shot(page, f"nobtn_{jid}"))
             page.wait_for_timeout(random.randint(1500, 3500))
-            if self._at_confirmation(page):
+            if self._at_confirmation(page) or self._at_confirmation_safe(target):
                 return ("applied", "", "")
             if "submit" in str(clicked).lower():
-                if not self._form_present(page) and not self.required_leftover(page):
+                if not self._form_present(self._resolve_form(page)) \
+                        and not self.required_leftover(self._resolve_form(page)):
                     return ("applied", "submitted (form closed)", "")
                 return ("needs_you", "verify submission manually",
                         self.safe_shot(page, f"verify_{jid}"))
         return ("needs_you", f"wizard exceeded {max_steps} steps",
                 self.safe_shot(page, f"long_{jid}"))
+
+    def _at_confirmation_safe(self, target) -> bool:
+        try:
+            content = (target.content() or "").lower()
+        except Exception:
+            return False
+        return any(h in content for h in self.CONFIRM_HINTS)
 
     def _form_present(self, page: Page) -> bool:
         try:
