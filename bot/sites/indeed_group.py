@@ -62,12 +62,12 @@ class IndeedGroupBot(BaseSiteBot):
         items = page.evaluate(self.GATHER_JS)
         self.notify.send(f"[{self.name}] '{title}': {len(items)} cards harvested")
         if not items:
-            head = ""
-            try:
-                head = page.content()[:200].lower()
-            except Exception:
-                pass
-            self.notify.send(f"[{self.name}] 0 cards | head: {head!r}")
+            dump = page.evaluate("""
+() => [...new Set([...document.querySelectorAll('a')].map(a => (a.href || '')
+      .split('#')[0]).filter(h => h.includes('job') || h.includes('/jobs/'
+      )) )].slice(0, 20)
+""")
+            self.notify.send(f"[{self.name}] 0 cards | href dump: {dump}")
             return 0
         new = 0
         for item in items:
@@ -152,23 +152,40 @@ class IndeedBot(IndeedGroupBot):
     name = "indeed"
     home = "https://in.indeed.com"
 
-    CARD_ANCHOR_SEL = 'a[href*="viewjob"], a[href*="/cmp/"]'
+    CARD_ANCHOR_SEL = 'a[data-jk], a[href*="viewjob"], a[href*="/cmp/"]'
     GATHER_JS = """
 () => {
   const out = new Map();
-  const rx = /(viewjob\\?|\\/cmp\\/[^\"]+\\/jobs\\/)/;
+  const push = (raw, box) => {
+    if (!raw) return;
+    const clean = raw.startsWith('http') ? raw.split('#')[0]
+                                         : location.origin + raw.split('#')[0];
+    if (out.has(clean)) return;
+    out.set(clean, { url: clean, box: (box || '').trim().slice(0, 600) });
+  };
+  // 1) Indeed SERP cards: data-jk anchors build the canonical viewjob URL
+  document.querySelectorAll('a[data-jk]').forEach(el => {
+    const jk = el.getAttribute('data-jk');
+    let box = '';
+    try {
+      const host = el.closest('.job_seen_beacon') || el.closest('article')
+        || el.closest('li') || el.parentElement.parentElement || el.parentElement;
+      box = (host && host.innerText || '');
+    } catch (e) {}
+    push(`${location.origin}/viewjob?jk=${jk}`, box);
+  });
+  // 2) any viewjob/cmp-jobs anchor
+  const rx = /(viewjob\\?jk=|&jk=|\\/cmp\\/[^\"]+\\/jobs\\/)/;
   document.querySelectorAll('a').forEach(a => {
     const raw = a.href || '';
     if (!rx.test(raw)) return;
-    const clean = raw.split('#')[0];
-    if (out.has(clean)) return;
     let box = '';
     try {
       const host = a.closest('.job_seen_beacon') || a.closest('article')
-        || a.closest('li') || a.parentElement.parentElement || a.parentElement;
-      box = (host && host.innerText || '').trim().slice(0, 600);
+        || a.closest('li') || a.parentElement.parentElement;
+      box = (host && host.innerText || '');
     } catch (e) {}
-    out.set(clean, { url: clean, box: box });
+    push(raw, box);
   });
   return [...out.values()].slice(0, 60);
 }
@@ -215,8 +232,10 @@ class GlassdoorBot(IndeedGroupBot):
 """
 
     def search_url_for(self, title: str) -> str:
-        from urllib.parse import quote_plus
-        return f"{self.home}/job-listings?sc.keyword={quote_plus(title)}"
+        kw = title.strip().lower().replace(" ", "-")
+        kw = re.sub(r"[^a-z0-9-]", "", kw)
+        n = len(title.strip())
+        return f"{self.home}/Job/{kw}-jobs-SRCH_KO0,{n}.htm"
 
     def fetch_new_jobs(self, page: Page) -> int:
         titles = [t.strip() for t in (self.targets.get("titles") or []) if t.strip()]
