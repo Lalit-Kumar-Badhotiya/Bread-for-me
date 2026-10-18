@@ -42,7 +42,7 @@ ALIAS_MAP = {
     "phone": "phone", "mobile": "phone", "contact number": "phone",
     "city": "city",
     "linkedin": "linkedin",
-    "github": "portfolio", "portfolio": "portfolio", "website": "portfolio",
+    "github": "github", "portfolio": "portfolio", "website": "portfolio",
     "university": "university", "college": "university", "school/institute": "university",
     "degree": "highest_degree",
     "headline": "resume_headline",
