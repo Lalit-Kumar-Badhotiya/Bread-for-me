@@ -614,5 +614,33 @@ class BaseSiteBot:
     def fetch_new_jobs(self, page: Page) -> int:
         raise NotImplementedError
 
+    def rescore_existing(self) -> int:
+        """Re-evaluate every pending row against the CURRENT targets.yaml.
+
+        Keeps the queue honest when you edit targets between runs: jobs you
+        now exclude drop out, jobs that now qualify (older fetches say) come
+        in. Applied/needs_you/failed rows are never touched.
+        """
+        min_score = int(self.targets.get("min_score", 70))
+        changed = 0
+        from ..scorer import score_job
+        for row in self.tracker.rescorable_rows():
+            score, reasons, reject = score_job(
+                row["title"], row["company"], row["location"],
+                row["description"], row["posted_date"] or "", self.targets)
+            status = "skipped" if (reject or score < min_score) else "queued"
+            if status != row["status"] or score != row["score"]:
+                self.tracker.rescore(row["id"], score, "; ".join(reasons)[:200],
+                                     status, "rescored against updated targets")
+                changed += 1
+        return changed
+
+    def fetch_and_rescore(self, page: Page) -> int:
+        n = self.fetch_new_jobs(page)
+        changed = self.rescore_existing()
+        self.notify.send(f"[{self.name}] rescore: {changed} rows re-classified "
+                         "against current targets")
+        return n
+
     def apply_job(self, page: Page, job) -> tuple[str, str, str]:
         raise NotImplementedError

@@ -152,7 +152,7 @@ def cmd_fetch(args):
     headless = bool(settings.get("run", {}).get("headless", False))
     pw, ctx, page = open_session(args.site, headless)
     try:
-        n = bot.fetch_new_jobs(page)
+        n = bot.fetch_and_rescore(page)
     except Exception as e:
         n = 0
         notifier.send(f"[{args.site}] fetch failed: {type(e).__name__}: {e}", toast=True)
@@ -195,7 +195,7 @@ def cmd_run(args):
     headless = bool(settings.get("run", {}).get("headless", False))
     pw, ctx, page = open_session(args.site, headless)
     try:
-        n = bot.fetch_new_jobs(page)
+        n = bot.fetch_and_rescore(page)
         bot.apply(page, max_apps=args.max)
         queued = tracker.queued(source=args.site, limit=100000)
         notifier2.send(f"[{args.site}] run done: fetched {n}, "

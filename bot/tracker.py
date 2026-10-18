@@ -216,5 +216,16 @@ class Tracker:
             out.setdefault(r["source"], {})[r["status"]] = r["c"]
         return out
 
+    def rescore(self, job_id: int, score: int, reasons: str, status: str, note: str = ""):
+        self.con.execute(
+            """UPDATE jobs SET score=?, score_reasons=?, status=?, status_note=?,
+                   updated_at=? WHERE id=?""",
+            (score, reasons, status, note, now(), job_id))
+        self.con.commit()
+
+    def rescorable_rows(self):
+        return self.con.execute(
+            "SELECT * FROM jobs WHERE status IN ('queued','skipped')").fetchall()
+
     def close(self):
         self.con.close()
