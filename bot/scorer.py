@@ -44,32 +44,34 @@ def score_job(title, company, location, description, posted_date, targets):
 
     title_l = (title or "").lower()
 
-    # 1) title match
+    # 1) title match — weights adapt: without must-have skills configured the
+    #    title alone carries more weight so the threshold stays reachable.
+    must_cfg = [s.lower() for s in _norm_list(targets.get("must_have_skills"))]
     titles = [t.lower() for t in _norm_list(targets.get("titles"))]
+    title_weight = 40 if must_cfg else 55
     if titles:
         if any(t in title_l for t in titles):
-            score += 40
+            score += title_weight
             reasons.append("title: exact match")
         else:
             for t in titles:
                 if all(w in blob for w in t.split()):
-                    score += 22
+                    score += int(title_weight * 0.55)
                     reasons.append(f"title: loose ({t})")
                     break
 
-    # 2) must-have skills — ALL required
-    must = [s.lower() for s in _norm_list(targets.get("must_have_skills"))]
-    missing = [s for s in must if s not in blob]
-    if must and missing:
+    # 2) must-have skills — ALL required (when configured)
+    missing = [s for s in must_cfg if s not in blob]
+    if must_cfg and missing:
         return 0, reasons + [f"missing must-have: {missing[0]}", "..."], True
-    if must:
+    if must_cfg:
         score += 40
-        reasons.append(f"must-have skills: all {len(must)}")
+        reasons.append(f"must-have skills: all {len(must_cfg)}")
 
     # 3) bonus skills
     bonus = [s.lower() for s in _norm_list(targets.get("bonus_skills"))]
     found = [s for s in bonus if s in blob]
-    score += min(re.escape and 6 * len(found), 12)
+    score += min(6 * len(found), 12)
     if found:
         reasons.append(f"bonus skills: {', '.join(found)}")
 

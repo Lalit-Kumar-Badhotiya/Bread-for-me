@@ -96,6 +96,7 @@ class NaukriBot(BaseSiteBot):
             page.wait_for_timeout(1500)
             self._dismiss_overlays(page)
             items = page.evaluate(GATHER_JS)
+            self.notify.send(f"[naukri] '{title}': {len(items)} cards harvested")
             if not items:
                 head = ""
                 try:

@@ -82,7 +82,7 @@ def get_bot(site: str, extra_titles=None, *, settings=None, profile=None,
     cls = getattr(mod, cls_name)
     return cls(settings["sites"].get(site, {}), tracker=tracker,
                settings=settings, profile=profile, targets=targets,
-               answers_lib=answers_lib, notifier=notifier), tracker, notifier
+               answers=answers_lib, notifier=notifier), tracker, notifier
 
 
 def open_session(site: str, headless: bool):
@@ -138,6 +138,8 @@ def cmd_login(args):
 def cmd_fetch(args):
     settings = load_yaml(CFG_DIR / "settings.yaml")
     bot, tracker, notifier = get_bot(args.site, extra_titles=args.title, settings=settings)
+    if getattr(args, "min_score", None) is not None:
+        bot.targets["min_score"] = int(args.min_score)
     headless = bool(settings.get("run", {}).get("headless", False))
     pw, ctx, page = open_session(args.site, headless)
     try:
@@ -176,6 +178,8 @@ def cmd_run(args):
                                       settings=settings, profile=profile,
                                       targets=targets, answers_lib=answers,
                                       tracker=tracker, notifier=notifier)
+    if getattr(args, "min_score", None) is not None:
+        bot.targets["min_score"] = int(args.min_score)
     if not bot.in_business_hours() and not args.force:
         print("Outside business hours (settings.run) — use --force to override.")
         sys.exit(3)
@@ -226,12 +230,14 @@ def main():
                                  description="Job application workflow")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("init", help="sanity check + create dirs")
+    sub.add_parser("init", help="sanity check + create dirs").set_defaults(fn=cmd_init)
 
     p = sub.add_parser("login"); p.add_argument("site"); p.set_defaults(fn=cmd_login)
 
     p = sub.add_parser("fetch"); p.add_argument("site")
     p.add_argument("--title", action="append", help="extra title for THIS fetch only")
+    p.add_argument("--min-score", type=int, default=None,
+                   help="override targets.min_score for this run (calibration)")
     p.set_defaults(fn=cmd_fetch)
 
     p = sub.add_parser("apply"); p.add_argument("site")
@@ -243,6 +249,7 @@ def main():
     p.add_argument("--title", action="append")
     p.add_argument("--max", type=int, default=None)
     p.add_argument("--force", action="store_true")
+    p.add_argument("--min-score", type=int, default=None)
     p.set_defaults(fn=cmd_run)
 
     p = sub.add_parser("calibrate"); p.add_argument("site")
