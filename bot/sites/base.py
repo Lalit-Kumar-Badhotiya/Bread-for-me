@@ -604,9 +604,13 @@ class BaseSiteBot:
 
     @staticmethod
     def _host_family(host: str) -> str:
-        """Host normalized for same-site comparison (strips www + country label):
-        in.indeed.com -> indeed.com ; www.glassdoor.co.in -> glassdoor.co.in"""
-        h = re.sub(r"^www\.", "", (host or "").lower().split(":")[0])
+        """Normalize a host OR full URL for same-site comparison (drops
+        scheme/path/port/www + country label):
+        in.indeed.com -> indeed.com ; https://www.glassdoor.co.in -> glassdoor.co.in"""
+        h = (host or "").lower()
+        h = re.sub(r"^[a-z][a-z0-9+.-]*://", "", h)   # drop scheme
+        h = h.split("/")[0].split(":")[0]             # drop path + port
+        h = re.sub(r"^www\.", "", h)
         labels = h.split(".")
         if len(labels) >= 3 and len(labels[0]) == 2:
             h = ".".join(labels[1:])
