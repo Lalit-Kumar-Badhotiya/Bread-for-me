@@ -54,6 +54,21 @@ def slugify(t: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", (t or "").lower()).strip("-")
 
 
+def posted_from_slug(slug_job_id: str) -> str:
+    """Naukri slugs end with ...-<DDMMYY><vendor: naukri.com embeds the post
+    date in the job id (e.g. ...171026015301 -> 17 Oct 26). Guaranteed fallback
+    when the card text omits the date chip."""
+    import datetime as _dt
+    m = re.search(r"(\d{6})\d{5,}" , slug_job_id or "")
+    if not m:
+        return ""
+    dd, mm, yy = m.group(1)[:2], m.group(1)[2:4], m.group(1)[4:6]
+    try:
+        return _dt.date(2000 + int(yy), int(mm), int(dd)).isoformat()
+    except ValueError:
+        return ""
+
+
 class NaukriBot(BaseSiteBot):
     name = "naukri"
     home = "https://www.naukri.com"
@@ -134,13 +149,16 @@ class NaukriBot(BaseSiteBot):
                 location = l.strip()[:80]
                 break
         score, reasons, reject = score_job(title, company, location, raw,
-                                           posted_date_from_text(raw), self.targets)
+                                           posted_date_from_text(raw)
+                                           or posted_from_slug(job_id),
+                                           self.targets)
         min_score = int(self.targets.get("min_score", 70))
         status = "skipped" if (reject or score < min_score) else "queued"
         job_id = url.rstrip("/").rsplit("/", 1)[-1]
         jid, is_new = self.tracker.upsert_job(
             source=self.name, source_job_id=job_id, url=url, title=title,
-            company=company, location=location, description=raw, posted_date="",
+            company=company, location=location, description=raw,
+            posted_date=posted_date_from_text(raw) or posted_from_slug(job_id),
             score=score, score_reasons="; ".join(reasons), status=status)
         if not is_new:
             self.tracker.set_status(jid, status, "; ".join(reasons)[:200])

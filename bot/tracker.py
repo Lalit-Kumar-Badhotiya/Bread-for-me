@@ -108,16 +108,21 @@ class Tracker:
 
     def _write_update(self, jid, *, source_job_id, url, description, posted_date,
                       score, score_reasons):
+        """Non-destructive update: never overwrite a good value with a worse
+        or empty one (harvest variance can blank posted_date/description)."""
         self.con.execute(
-            """UPDATE jobs SET source_job_id=COALESCE(?,source_job_id),
-                   url=COALESCE(?,url), description=COALESCE(?,description),
-                   posted_date=COALESCE(?,posted_date),
+            """UPDATE jobs SET
+                   source_job_id=COALESCE(?,source_job_id),
+                   url=COALESCE(?,url),
+                   description=CASE WHEN ?<>'' THEN ? ELSE description END,
+                   posted_date=CASE WHEN ?<>'' THEN ? ELSE posted_date END,
                    score=COALESCE(NULLIF(?,0),score),
                    score_reasons=CASE WHEN ?<>'' THEN ? ELSE score_reasons END,
                    updated_at=?
                WHERE id=?""",
-            (source_job_id, url, description, posted_date, score, score_reasons,
-             score_reasons, now(), jid))
+            (source_job_id, url, description, description,
+             posted_date, posted_date, score, score_reasons, score_reasons,
+             now(), jid))
         self.con.commit()
 
     def upsert_job(self, *, source, source_job_id, url, title, company, location,
