@@ -64,10 +64,18 @@ class IndeedGroupBot(BaseSiteBot):
         if not items:
             dump = page.evaluate("""
 () => [...new Set([...document.querySelectorAll('a')].map(a => (a.href || '')
-      .split('#')[0]).filter(h => h.includes('job') || h.includes('/jobs/'
-      )) )].slice(0, 20)
+      .split('#')[0]).filter(h => h.includes('job') || h.includes('/jobs/'))).slice(0, 20)]
 """)
-            self.notify.send(f"[{self.name}] 0 cards | href dump: {dump}")
+            extra = page.evaluate("""
+() => {
+  const c = s => document.querySelectorAll(s).length;
+  return `selectors: a[data-jk]=${c('a[data-jk]')} serpjob=${c('[class*="SerpJob"]')} `
+       + `jobcard=${c('[class*="jobcard"]')} card=${c('[class*="card"]')} `
+       + `totalA=${document.querySelectorAll('a').length} `
+       + `text=${(document.body.innerText||'').slice(0,120).replace(/\\n/g,' | ')}`;
+}
+""")
+            self.notify.send(f"[{self.name}] 0 cards | {extra} | href dump: {dump}")
             return 0
         new = 0
         for item in items:
