@@ -148,17 +148,16 @@ class NaukriBot(BaseSiteBot):
             if ("," in l or "/" in l) and not re.search(r"\d+\.\d|reviews?|skills", l, re.I):
                 location = l.strip()[:80]
                 break
+        job_id = url.rstrip("/").rsplit("/", 1)[-1]
+        posted = posted_date_from_text(raw) or posted_from_slug(job_id)
         score, reasons, reject = score_job(title, company, location, raw,
-                                           posted_date_from_text(raw)
-                                           or posted_from_slug(job_id),
-                                           self.targets)
+                                           posted, self.targets)
         min_score = int(self.targets.get("min_score", 70))
         status = "skipped" if (reject or score < min_score) else "queued"
-        job_id = url.rstrip("/").rsplit("/", 1)[-1]
         jid, is_new = self.tracker.upsert_job(
             source=self.name, source_job_id=job_id, url=url, title=title,
             company=company, location=location, description=raw,
-            posted_date=posted_date_from_text(raw) or posted_from_slug(job_id),
+            posted_date=posted,
             score=score, score_reasons="; ".join(reasons), status=status)
         if not is_new:
             self.tracker.set_status(jid, status, "; ".join(reasons)[:200])
