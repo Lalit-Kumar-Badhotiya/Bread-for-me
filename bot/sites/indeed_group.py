@@ -265,11 +265,11 @@ class SimplyHiredBot(IndeedGroupBot):
     name = "simplyhired"
     home = "https://www.simplyhired.co.in"
 
-    CARD_ANCHOR_SEL = 'a[href*="/job/view/"], a[href*="/job/"]'
+    CARD_ANCHOR_SEL = 'a[href*="/job/"]'
     GATHER_JS = """
 () => {
   const out = new Map();
-  const rx = /\\/job\\/(view|listing)/;
+  const rx = /\\/job\\/[A-Za-z0-9_-]{12,}/;
   document.querySelectorAll('a').forEach(a => {
     const raw = a.href || a.getAttribute('href') || '';
     if (!rx.test(raw)) return;
@@ -289,7 +289,7 @@ class SimplyHiredBot(IndeedGroupBot):
 
     def search_url_for(self, title: str) -> str:
         from urllib.parse import quote_plus
-        return f"{self.home}/jobsearch?q={quote_plus(title)}"
+        return f"{self.home}/search?q={quote_plus(title)}"
 
     def fetch_new_jobs(self, page: Page) -> int:
         titles = [t.strip() for t in (self.targets.get("titles") or []) if t.strip()]
