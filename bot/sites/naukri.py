@@ -13,7 +13,7 @@ import re
 import time
 
 from ..scorer import score_job
-from .base import BaseSiteBot, Page, posted_date_from_text
+from .base import RESUME_PATH, BaseSiteBot, Page, posted_date_from_text
 
 CONFIRM_HINTS_EXTRA = ("you have applied", "your application has been sent",
                        "applied successfully", "has been sent to")
@@ -46,6 +46,39 @@ GATHER_JS = """
     }
   });
   return [...out.values()];
+}
+"""
+
+# Snapshot of the recruiter-chat panel (Naukri's Chatbotworkflow v5 widget).
+# Everything is driven through these five anchors; the element ids carry a
+# per-render random suffix, so only classes / id-suffixes are stable.
+CHAT_STATE_JS = """
+() => {
+  const box = document.querySelector('[id$="ChatbotContainer"]');
+  if (!box) return null;
+  const vis = e => e && e.offsetParent !== null;
+  const chips = [...box.querySelectorAll('div.chatbot_Chip')]
+    .filter(e => e.offsetParent !== null)
+    .map(e => (e.innerText || '').trim()).filter(Boolean);
+  const botMsgs = [...box.querySelectorAll('li.botItem span, li[class*=botItem] span')]
+    .filter(e => e.offsetParent !== null)
+    .map(e => (e.innerText || '').trim()).filter(Boolean);
+  const sendEl = box.querySelector('.sendMsgbtn_container .sendMsg');
+  const sendBox = sendEl ? sendEl.closest('.send') : null;
+  const ta = box.querySelector('div.textArea[contenteditable=true]');
+  const radios = [...box.querySelectorAll('input[type=radio]')]
+    .filter(e => e.offsetParent !== null)
+    .map(e => {
+      const host = e.closest('label') || e.closest('div');
+      return {id: e.id || '',
+              text: host ? (host.innerText || '').trim().slice(0, 90) : ''};
+    });
+  return {chips: chips, botMsgs: botMsgs,
+          sendText: sendEl ? (sendEl.innerText || '').trim() : '',
+          sendEnabled: sendBox ? !sendBox.className.includes('disabled') : false,
+          inputVisible: vis(ta),
+          radios: radios,
+          text: (box.innerText || '').slice(0, 3000)};
 }
 """
 
@@ -192,6 +225,202 @@ class NaukriBot(BaseSiteBot):
         if not apply_loc:
             return ("needs_you", "no apply button", self.safe_shot(page, f"noapply_{job['id']}"))
         return self.wizard(page, job["id"], apply_loc)
+
+    # ========================================================== chat apply
+    # Naukri's newer apply flows open a scripted recruiter chat (the
+    # "Chatbotworkflow v5" widget) instead of a form:
+    #   * option chips are plain <div class="chatbot_Chip">, NOT buttons
+    #   * the resume must be handed over by clicking the 'Upload Resume'
+    #     chip; setting the hidden input directly is rejected server-side
+    #     ("File upload was unsuccessful")
+    #   * the footer is a div.sendMsg ('Send'/'Save') that stays greyed out
+    #     until the current step has been answered
+    CHATBOT_BOX = '[id$="ChatbotContainer"]'
+
+    def chatbot_present(self, page: Page) -> bool:
+        """Visible when the chat footer / a chip / its text box is on screen.
+
+        The container element itself is position:fixed (offset checks lie).
+        Some steps make the SPA reload the page, tearing the widget down for a
+        moment — so retry across those races before declaring it gone.
+        """
+        vis = (f'{self.CHATBOT_BOX} .sendMsgbtn_container, '
+               f'{self.CHATBOT_BOX} div.chatbot_Chip, '
+               f'{self.CHATBOT_BOX} div.textArea[contenteditable="true"]')
+        for _ in range(3):
+            try:
+                page.wait_for_selector(vis, timeout=4000, state="visible")
+                return True
+            except Exception:
+                try:
+                    if page.is_closed():
+                        return False
+                except Exception:
+                    return False
+        return False
+
+    def _chat_state(self, page: Page):
+        try:
+            return page.evaluate(CHAT_STATE_JS)
+        except Exception:
+            return None
+
+    def chatbot_flow(self, page: Page, jid) -> tuple[str, str, str]:
+        max_steps = int((self.settings.get("limits", {}) or {}).get("max_wizard_steps", 30))
+        uploads = 0
+        seen = None
+        stall = 0
+        for _ in range(max_steps):
+            page.wait_for_timeout(1800)
+            if self.applied_signal(page):
+                return ("applied", "applied via recruiter chat", "")
+            if not self.chatbot_present(page):
+                return ("needs_you", "chat panel closed without confirmation",
+                        self.safe_shot(page, f"chatgone_{jid}"))
+            st = self._chat_state(page)
+            if st is None:
+                continue
+            last_q = (st["botMsgs"][-1] if st["botMsgs"] else "")[:160]
+            sig = (tuple(st["chips"]), last_q, st["inputVisible"], len(st["radios"]))
+            if sig == seen:
+                stall += 1
+                if stall >= 3:
+                    return ("needs_you", f"needs your input: {last_q}",
+                            self.safe_shot(page, f"chatstuck_{jid}"))
+            else:
+                stall, seen = 0, sig
+
+            # 1) resume step: click the chip so the workflow accepts the file
+            up = next((c for c in st["chips"] if "upload resume" in c.lower()), None)
+            if up and uploads < 2:
+                uploads += 1
+                self._chat_upload(page, up)
+                continue
+            if up:  # both attempts failed -> use the chat's explicit skip
+                if self._click_chat_chip(page, "do it later"):
+                    continue
+
+            # 2) multiple-choice chips (recruiter questions)
+            ctl = ("upload resume", "do it later", "skip", "not now")
+            opts = [c for c in st["chips"] if c.lower() not in ctl]
+            if opts and last_q:
+                ans = self.answer_for(last_q)
+                if ans and self._click_chat_option(page, ans, opts):
+                    continue
+
+            # 3) radio options inside the chat
+            if st["radios"] and last_q:
+                ans = self.answer_for(last_q)
+                if ans and self._click_chat_radio(page, ans, st["radios"]):
+                    continue
+
+            # 4) free-text question
+            if st["inputVisible"] and last_q:
+                ans = self.answer_for(last_q)
+                if ans and self._chat_send_text(page, ans):
+                    continue
+
+            # 5) nothing to answer -> the footer button advances/submits
+            if st["sendEnabled"] and self._chat_click_send(page):
+                continue
+        return ("needs_you", f"chat flow exceeded {max_steps} steps",
+                self.safe_shot(page, f"chatlong_{jid}"))
+
+    # ------------------------------------------------------ chat internals
+    def _click_chat_chip(self, page: Page, text: str) -> bool:
+        try:
+            loc = page.locator(f'{self.CHATBOT_BOX} div.chatbot_Chip').filter(
+                has_text=re.compile(re.escape(text), re.I)).first
+            if loc.count() and loc.is_visible():
+                loc.click(timeout=3000)
+                page.wait_for_timeout(1500)
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _click_chat_option(self, page: Page, ans: str, opts: list[str]) -> bool:
+        a = (ans or "").strip().lower()
+        if not a:
+            return False
+        hit = next((o for o in opts if o.lower() == a), None)
+        if not hit:
+            hit = next((o for o in opts if a in o.lower() or o.lower() in a), None)
+        return bool(hit) and self._click_chat_chip(page, hit)
+
+    def _click_chat_radio(self, page: Page, ans: str, radios: list[dict]) -> bool:
+        a = (ans or "").strip().lower()
+        if not a:
+            return False
+        for r in radios:
+            txt = (r.get("text") or "").lower()
+            if not (a == txt or a in txt or txt in a):
+                continue
+            try:
+                if r.get("id"):
+                    loc = page.locator(f'#{r["id"]}')
+                    try:
+                        loc.check(timeout=2500)
+                    except Exception:
+                        try:
+                            loc.click(force=True, timeout=2000)
+                        except Exception:
+                            loc.evaluate(
+                                "e => (e.closest('label') || e.parentElement).click()")
+                else:
+                    page.get_by_text(r.get("text") or "", exact=True).first.click(timeout=3000)
+                page.wait_for_timeout(1200)
+                return True
+            except Exception:
+                continue
+        return False
+
+    def _chat_send_text(self, page: Page, text: str) -> bool:
+        try:
+            ta = page.locator(f'{self.CHATBOT_BOX} div.textArea[contenteditable="true"]').first
+            ta.click(timeout=3000)
+            ta.fill(text, timeout=3000)
+            page.wait_for_timeout(600)
+            if not self._chat_click_send(page):
+                try:  # some steps submit the message on Enter instead
+                    ta.press("Enter", timeout=2000)
+                    page.wait_for_timeout(1200)
+                except Exception:
+                    pass
+            return True
+        except Exception:
+            return False
+
+    def _chat_click_send(self, page: Page) -> bool:
+        try:
+            box = page.locator(f'{self.CHATBOT_BOX} .sendMsgbtn_container .send').first
+            if "disabled" in (box.get_attribute("class") or ""):
+                return False
+            page.locator(f'{self.CHATBOT_BOX} .sendMsgbtn_container .sendMsg').first.click(
+                timeout=3000)
+            page.wait_for_timeout(1500)
+            return True
+        except Exception:
+            return False
+
+    def _chat_upload(self, page: Page, chip_text: str) -> bool:
+        loc = page.locator(f'{self.CHATBOT_BOX} div.chatbot_Chip').filter(
+            has_text=re.compile(re.escape(chip_text), re.I)).first
+        try:
+            with page.expect_file_chooser(timeout=6000) as fc:
+                loc.click(timeout=4000)
+            fc.value.set_files(str(RESUME_PATH))
+            page.wait_for_timeout(4000)
+            return True
+        except Exception:
+            pass
+        try:  # chip clicked but no chooser event: use the workflow's own input
+            page.locator(f'{self.CHATBOT_BOX} input.chatbot_Uploader').set_input_files(
+                str(RESUME_PATH), timeout=4000)
+            page.wait_for_timeout(3000)
+            return True
+        except Exception:
+            return False
 
     # ----------------------------------------------------------- naukri bits
     def _dismiss_overlays(self, page: Page):

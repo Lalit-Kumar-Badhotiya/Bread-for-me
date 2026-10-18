@@ -172,6 +172,8 @@ def cmd_apply(args):
                                      tracker=tracker, notifier=notifier)
     if getattr(args, "no_learn", False):
         bot.settings.setdefault("run", {})["interactive_learning"] = False
+    if args.force:
+        bot.force_hours = True
     if not bot.in_business_hours() and not args.force:
         print("Outside business hours (settings.run) — use --force to override.")
         sys.exit(3)
@@ -192,6 +194,8 @@ def cmd_run(args):
                                       tracker=tracker, notifier=notifier)
     if getattr(args, "no_learn", False):
         bot.settings.setdefault("run", {})["interactive_learning"] = False
+    if args.force:
+        bot.force_hours = True
     if getattr(args, "min_score", None) is not None:
         bot.targets["min_score"] = int(args.min_score)
     if not bot.in_business_hours() and not args.force:

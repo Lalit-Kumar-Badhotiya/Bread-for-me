@@ -188,6 +188,7 @@ class BaseSiteBot:
         self.targets = targets
         self.answers = answers
         self.notify = notifier
+        self.force_hours = False   # set by the CLI when --force is passed
         self._leaf_index = _flatten(profile)
         SHOT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -205,6 +206,8 @@ class BaseSiteBot:
         return max(0, min(site_left, total_left))
 
     def in_business_hours(self) -> bool:
+        if self.force_hours:
+            return True
         r = self.settings.get("run", {}) or {}
         if not r.get("business_hours_only", True):
             return True
@@ -346,8 +349,11 @@ class BaseSiteBot:
             return self._s((self.profile.get("experience") or {}).get("willing_to_relocate"))
         if "notice" in q:
             return self._s((self.profile.get("experience") or {}).get("notice_period"))
-        if "salary" in q or "compensation" in q or "ctc" in q:
-            return self._s((self.profile.get("experience") or {}).get("expected_salary"))
+        if "ctc" in q or "salary" in q or "compensation" in q:
+            exp = self.profile.get("experience") or {}
+            if "current" in q and "expected" not in q:
+                return self._s(exp.get("current_salary"))  # unknown -> learn it
+            return self._s(exp.get("expected_salary"))
         if "currently employed" in q or "currently working" in q:
             return self._s((self.profile.get("experience") or {}).get("currently_employed"))
         return None
@@ -602,6 +608,16 @@ class BaseSiteBot:
         """Site override: page shows the apply flow handed off to a company site."""
         return False
 
+    # =============================================== chat-style apply flows
+    def chatbot_present(self, page: Page) -> bool:
+        """Site override: the Apply click opened a chat widget (no form)."""
+        return False
+
+    def chatbot_flow(self, page: Page, jid) -> tuple[str, str, str]:
+        """Site override: drive the chat widget from question to submission."""
+        return ("needs_you", "chat-style apply flow is not supported here",
+                self.safe_shot(page, f"chat_{jid}"))
+
     def wizard(self, page: Page, jid, apply_loc) -> tuple[str, str, str]:
         """Generic apply flow from the Apply click to submission/confirmation.
 
@@ -634,6 +650,8 @@ class BaseSiteBot:
         if self.external_apply_signal(page):
             return ("needs_you", "external apply flow (company website)",
                     self.safe_shot(page, f"external_{jid}"))
+        if self.chatbot_present(page):
+            return self.chatbot_flow(page, jid)
         max_steps = int((self.settings.get("limits", {}) or {}).get("max_wizard_steps", 30))
         stall = 0
         for _step in range(max_steps):
@@ -655,6 +673,9 @@ class BaseSiteBot:
             if not clicked:
                 clicked = self.click_matching(target, self.SUBMIT_PATTERNS)
             if not clicked:
+                # a chat-style panel may have opened late; hand it over now
+                if self.chatbot_present(page):
+                    return self.chatbot_flow(page, jid)
                 if (self._at_confirmation(page) or self._at_confirmation_safe(target)
                         or self.applied_signal(page)):
                     return ("applied", "", "")

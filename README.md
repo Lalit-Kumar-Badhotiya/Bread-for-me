@@ -71,9 +71,18 @@ queue — your rejects become new `exclude_keywords`. Then start `apply`.
 | `bot/scorer.py` | targets.yaml → 0–100 score → queued/skipped |
 | `bot/answers.py` | screener Q/A library (learns from your answers) |
 | `bot/sites/base.py` | wizard engine + form filling shared by all sites |
-| `bot/sites/naukri.py` | Naukri fetch + apply |
+| `bot/sites/naukri.py` | Naukri fetch + apply (incl. the recruiter-chat apply flow) |
 | `data/` | tracker.db, browser sessions, screenshots (gitignored) |
 | `data/logs/shots/` | screenshots for every `needs_you` pause |
+
+Naukri apply quirks handled automatically: newer postings open a scripted
+recruiter chat instead of a form. The bot hands the resume over through its
+"Upload Resume" chip (setting the hidden file input directly gets rejected by
+the site), answers chips / radio options / free-text questions from
+`answers.yaml` + `profile.yaml`, tolerates the page reloads the chat triggers,
+and presses the chat's Save only once it unlocks. Questions it cannot answer
+return `needs_you` with the exact wording, so the screener learning loop can
+capture them for next time.
 
 ## Status / roadmap
 
