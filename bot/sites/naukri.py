@@ -170,6 +170,8 @@ class NaukriBot(BaseSiteBot):
         page.goto(url, wait_until="domcontentloaded", timeout=45000)
         page.wait_for_timeout(2000)
         self._dismiss_overlays(page)
+        if self.applied_signal(page):
+            return ("applied", "already applied on site (detected on job page)", "")
         apply_loc = self.find_apply(
             page, self.APPLY_LOCATORS,
             role_rx=re.compile(r"^apply( now)?$", re.I))
@@ -188,6 +190,29 @@ class NaukriBot(BaseSiteBot):
                     page.wait_for_timeout(400)
             except Exception:
                 continue
+
+    # --------------------------------------------------- applied detection
+    def applied_signal(self, page: Page) -> bool:
+        """Naukri turns the Apply button into a green 'Applied' pill once done."""
+        try:
+            return bool(page.evaluate("""() => {
+                const els = [...document.querySelectorAll('button, a, div, span')]
+                    .filter(e => e.offsetParent !== null);
+                return els.some(e => (e.innerText || '').trim().toLowerCase()
+                    .replace(/[^a-z]/g, '') === 'applied');
+            }"""))
+        except Exception:
+            return False
+
+    def dismiss_interstitial(self, page: Page):
+        """Post-apply profile nudge panel: take its explicit 'I'll do it later' skip."""
+        try:
+            loc = page.get_by_role("button", name=re.compile(r"do it later", re.I)).first
+            if loc.count() and loc.is_visible():
+                loc.click(timeout=2000)
+                page.wait_for_timeout(800)
+        except Exception:
+            pass
 
     def _login_needed(self, page: Page) -> bool:
         if super()._login_needed(page):

@@ -533,6 +533,14 @@ class BaseSiteBot:
             return True
         return any(h in content for h in self.CONFIRM_HINTS)
 
+    def applied_signal(self, page: Page) -> bool:
+        """Site override: the page itself proves this job is (now) applied."""
+        return False
+
+    def dismiss_interstitial(self, page: Page) -> None:
+        """Site override: skip/close optional nudge overlays that block the flow."""
+        pass
+
     def wizard(self, page: Page, jid, apply_loc) -> tuple[str, str, str]:
         """Generic apply flow from the Apply click to submission/confirmation.
 
@@ -558,6 +566,10 @@ class BaseSiteBot:
             if not self.await_manual_login(page):
                 return ("needs_you", "manual login required (timed out)",
                         self.safe_shot(page, f"login_{jid}"))
+        self.dismiss_interstitial(page)
+        if self.applied_signal(page):
+            # e.g. Naukri 1-click apply: the click already submitted, page shows "Applied"
+            return ("applied", "applied state detected after click", "")
         max_steps = int((self.settings.get("limits", {}) or {}).get("max_wizard_steps", 30))
         stall = 0
         for _step in range(max_steps):
@@ -579,14 +591,16 @@ class BaseSiteBot:
             if not clicked:
                 clicked = self.click_matching(target, self.SUBMIT_PATTERNS)
             if not clicked:
-                if self._at_confirmation(page) or self._at_confirmation_safe(target):
+                if (self._at_confirmation(page) or self._at_confirmation_safe(target)
+                        or self.applied_signal(page)):
                     return ("applied", "", "")
                 if not leftover and not self._form_present(target):
                     return ("applied", "form closed without confirmation", "")
                 return ("needs_you", "no next/submit button found",
                         self.safe_shot(page, f"nobtn_{jid}"))
             page.wait_for_timeout(random.randint(1500, 3500))
-            if self._at_confirmation(page) or self._at_confirmation_safe(target):
+            if (self._at_confirmation(page) or self._at_confirmation_safe(target)
+                    or self.applied_signal(page)):
                 return ("applied", "", "")
             if "submit" in str(clicked).lower():
                 if not self._form_present(self._resolve_form(page)) \
