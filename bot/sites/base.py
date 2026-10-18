@@ -172,11 +172,20 @@ class BaseSiteBot:
     SUBMIT_PATTERNS = [r"^submit application$", r"^submit", r"^apply now$", r"^apply$"]
     APPLY_LOCATORS = ('button:has-text("Apply")', 'a:has-text("Apply")',
                       'button:has-text("Apply now")', 'a:has-text("Apply now")')
+    # Post-submit phrases ONLY. Generic ones ("your application", "thank you!",
+    # "have applied") matched scripts/JSON and pre-submit modal copy on
+    # unsubmitted forms -> false "applied" verdicts (found live 2026-10-18 on
+    # glassdoor/simplyhired/indeed/wellfound).
     CONFIRM_HINTS = ("thank you for your interest", "application has been",
-                     "application submitted", "thank you!", "successfully applied",
-                     "your application", "have applied")
+                     "application submitted", "successfully applied",
+                     "thanks for applying", "application sent",
+                     "you have applied", "you've applied")
     DECLARATION_RX = None          # subclass regex -> auto-tick declaration boxes
     EXTERNAL_APPLY_GUARD = False   # if True: leaving our domain = needs_you
+    # extra domains the guard accepts (subdomains included); used where the
+    # site's apply legitimately hops to shared infra, e.g. indeed's
+    # smartapply.indeed.com from the glassdoor/simplyhired flows
+    ALLOWED_APPLY_FAMILIES = ()
 
     def __init__(self, cfg: dict, *, tracker: Tracker, settings: dict,
                  profile: dict, targets: dict, answers: AnswerLibrary,
@@ -592,15 +601,27 @@ class BaseSiteBot:
                 continue
         return False
 
-    def _at_confirmation(self, page: Page) -> bool:
+    def _confirmation_phrase(self, page: Page) -> str:
+        """The matched confirmation phrase ("" when none). Reads VISIBLE text
+        only — page.content() includes <script> JSON that false-matched."""
         try:
-            content = page.content().lower()
+            url_l = (page.url or "").lower()
         except Exception:
-            return False
-        url_l = (page.url or "").lower()
-        if re.search(r"confirmation|complete", url_l):
-            return True
-        return any(h in content for h in self.CONFIRM_HINTS)
+            url_l = ""
+        m = re.search(r"confirmation|complete", url_l)
+        if m:
+            return f"url contains '{m.group(0)}'"
+        try:
+            content = page.inner_text("body").lower()
+        except Exception:
+            content = ""
+        for h in self.CONFIRM_HINTS:
+            if h in content:
+                return h
+        return ""
+
+    def _at_confirmation(self, page: Page) -> bool:
+        return bool(self._confirmation_phrase(page))
 
     @staticmethod
     def _host_family(host: str) -> str:
@@ -647,18 +668,41 @@ class BaseSiteBot:
         """
         if apply_loc:
             try:
+                tabs_before = list(page.context.pages)
+            except Exception:
+                tabs_before = []
+            try:
                 apply_loc.click(timeout=5000)
             except Exception as e:
                 return ("needs_you", f"apply click failed: {type(e).__name__}",
                         self.safe_shot(page, f"clickfail_{jid}"))
             page.wait_for_timeout(random.randint(1500, 3000))
+            # "Apply"/"Apply Now ↗" often opens the real form in a NEW TAB
+            # (glassdoor/simplyhired -> smartapply.indeed.com). Follow it.
+            try:
+                fresh = [p for p in page.context.pages if p not in tabs_before]
+            except Exception:
+                fresh = []
+            if fresh:
+                newp = fresh[-1]
+                try:
+                    newp.wait_for_load_state("domcontentloaded", timeout=20000)
+                except Exception:
+                    pass
+                newp.wait_for_timeout(1500)
+                page = newp
             if self.EXTERNAL_APPLY_GUARD:
                 m = re.match(r"https?://([^/]+)", page.url or "")
                 host = m.group(1) if m else ""
                 if host:
                     fam = self._host_family(host)
                     home_fam = self._host_family(self.home)
-                    if fam != home_fam and not fam.endswith("." + home_fam):
+                    allowed = fam == home_fam or fam.endswith("." + home_fam)
+                    for a in self.ALLOWED_APPLY_FAMILIES:
+                        if fam == a or fam.endswith("." + a):
+                            allowed = True
+                            break
+                    if not allowed:
                         return ("needs_you", f"external apply flow ({host})",
                                 self.safe_shot(page, f"external_{jid}"))
         if self._login_needed(page):
@@ -699,9 +743,11 @@ class BaseSiteBot:
                 # a chat-style panel may have opened late; hand it over now
                 if self.chatbot_present(page):
                     return self.chatbot_flow(page, jid)
-                if (self._at_confirmation(page) or self._at_confirmation_safe(target)
-                        or self.applied_signal(page)):
-                    return ("applied", "", self.safe_shot(page, f"app_{jid}"))
+                ph = (self._confirmation_phrase(page)
+                      or self._confirmation_phrase_safe(target))
+                if ph or self.applied_signal(page):
+                    return ("applied", f"confirmed: {ph or 'applied state'}",
+                            self.safe_shot(page, f"app_{jid}"))
                 if self.external_apply_signal(page):
                     return ("needs_you", "external apply flow (company website)",
                             self.safe_shot(page, f"external_{jid}"))
@@ -711,9 +757,11 @@ class BaseSiteBot:
                 return ("needs_you", "no next/submit button found",
                         self.safe_shot(page, f"nobtn_{jid}"))
             page.wait_for_timeout(random.randint(1500, 3500))
-            if (self._at_confirmation(page) or self._at_confirmation_safe(target)
-                    or self.applied_signal(page)):
-                return ("applied", "", self.safe_shot(page, f"app_{jid}"))
+            ph = (self._confirmation_phrase(page)
+                  or self._confirmation_phrase_safe(target))
+            if ph or self.applied_signal(page):
+                return ("applied", f"confirmed: {ph or 'applied state'}",
+                        self.safe_shot(page, f"app_{jid}"))
             if "submit" in str(clicked).lower():
                 if not self._form_present(self._resolve_form(page)) \
                         and not self.required_leftover(self._resolve_form(page)):
@@ -724,12 +772,18 @@ class BaseSiteBot:
         return ("needs_you", f"wizard exceeded {max_steps} steps",
                 self.safe_shot(page, f"long_{jid}"))
 
-    def _at_confirmation_safe(self, target) -> bool:
+    def _confirmation_phrase_safe(self, target) -> str:
         try:
-            content = (target.content() or "").lower()
+            content = (target.inner_text("body") or "").lower()
         except Exception:
-            return False
-        return any(h in content for h in self.CONFIRM_HINTS)
+            return ""
+        for h in self.CONFIRM_HINTS:
+            if h in content:
+                return h
+        return ""
+
+    def _at_confirmation_safe(self, target) -> bool:
+        return bool(self._confirmation_phrase_safe(target))
 
     def _form_present(self, page: Page) -> bool:
         try:

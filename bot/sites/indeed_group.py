@@ -30,6 +30,9 @@ class IndeedGroupBot(BaseSiteBot):
         '[data-testid*="apply"]',
     )
     EXTERNAL_APPLY_GUARD = True
+    # this group's apply flows legitimately hop to indeed's own hosted form
+    # (smartapply.indeed.com) — accept it and follow the new tab
+    ALLOWED_APPLY_FAMILIES = ("indeed.com",)
 
     # ------------------------------------------------- shared group quota
     def quota_left(self) -> int:
@@ -149,7 +152,15 @@ class IndeedGroupBot(BaseSiteBot):
             role_rx=re.compile(r"^apply( now)?$", re.I))
         if not apply_loc:
             return ("needs_you", "no apply button", self.safe_shot(page, f"noapply_{job['id']}"))
-        return self.wizard(page, job["id"], apply_loc)
+        result = self.wizard(page, job["id"], apply_loc)
+        # close form tabs the wizard followed so they don't pile up per job
+        try:
+            for p in page.context.pages:
+                if p is not page:
+                    p.close()
+        except Exception:
+            pass
+        return result
 
     def _resolve_form(self, page: Page):
         """Indeed-style flows embed the form in a child iframe — find it."""
