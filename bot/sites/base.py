@@ -489,7 +489,8 @@ class BaseSiteBot:
                 self.human_pause(1.5, 3.5)
         return progress
 
-    def _login_needed(self, page: Page) -> bool:        try:
+    def _login_needed(self, page: Page) -> bool:
+        try:
             if re.search(LOGIN_URL_RX, (page.url or "")):
                 return True
             return page.locator("input[type=password]:visible").count() > 0
