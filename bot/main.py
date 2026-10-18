@@ -35,9 +35,11 @@ RESUME_PATH = ROOT / "resume" / "resume.pdf"
 REGISTRY = {
     "naukri": ("bot.sites.naukri", "NaukriBot",
                "https://www.naukri.com"),
-    # Phase 3+ registrations (wellfound, then indeed group incl. glassdoor &
-    # simplyhired) land here. LinkedIn stays manual-by-design FOREVER and is
-    # never registered or automated.
+    "wellfound": ("bot.sites.wellfound", "WellfoundBot",
+                  "https://wellfound.com"),
+    # Phase 3 registrations (indeed group incl. glassdoor & simplyhired) land
+    # here. LinkedIn stays manual-by-design FOREVER and is never registered
+    # or automated.
 }
 
 
@@ -94,6 +96,8 @@ def open_session(site: str, headless: bool):
     ctx = pw.chromium.launch_persistent_context(
         str(state), headless=headless,
         args=["--disable-blink-features=AutomationControlled"])
+    ctx.add_init_script(
+        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
     ctx.set_default_timeout(20000)
     page = ctx.pages[0] if ctx.pages else ctx.new_page()
     return pw, ctx, page

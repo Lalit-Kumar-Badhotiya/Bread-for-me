@@ -136,6 +136,23 @@ REQUIRED_JS = """
 """
 
 
+def posted_date_from_text(raw: str) -> str:
+    """Relative date chips ('3 days ago', '2 weeks ago', 'today') -> ISO date
+    so the scorer's freshness/max_age_days checks actually work."""
+    l = (raw or "").lower()
+    today = dt.date.today()
+    if re.search(r"\bfew hours?\b|\bjust now\b|\btoday\b", l):
+        return today.isoformat()
+    m = re.search(r"(\d+)\s*hour", l)
+    if m:
+        return today.isoformat()
+    for rx, mult in ((r"(\d+)\s*day", 1), (r"(\d+)\s*week", 7), (r"(\d+)\s*month", 30)):
+        m = re.search(rx, l)
+        if m:
+            return (today - dt.timedelta(days=int(m.group(1)) * mult)).isoformat()
+    return ""
+
+
 def _flatten(d):
     """Leaf-key -> value (keys lowercased) across nested dicts."""
     out = {}

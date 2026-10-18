@@ -11,10 +11,9 @@ Login (email/OTP) is manual-once, then the session persists.
 """
 import re
 import time
-import datetime as dt
 
 from ..scorer import score_job
-from .base import BaseSiteBot, Page
+from .base import BaseSiteBot, Page, posted_date_from_text
 
 CONFIRM_HINTS_EXTRA = ("you have applied", "your application has been sent",
                        "applied successfully", "has been sent to")
@@ -53,23 +52,6 @@ GATHER_JS = """
 
 def slugify(t: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", (t or "").lower()).strip("-")
-
-
-def posted_date_from_text(raw: str) -> str:
-    """Naukri shows 'X days ago' style chips — convert to an ISO date so the
-    scorer's freshness/max_age_days checks actually work."""
-    l = (raw or "").lower()
-    today = dt.date.today()
-    if re.search(r"\bfew hours?\b|\bjust now\b|\btoday\b", l):
-        return today.isoformat()
-    m = re.search(r"(\d+)\s*hour", l)
-    if m:
-        return today.isoformat()
-    for rx, mult in ((r"(\d+)\s*day", 1), (r"(\d+)\s*week", 7), (r"(\d+)\s*month", 30)):
-        m = re.search(rx, l)
-        if m:
-            return (today - dt.timedelta(days=int(m.group(1)) * mult)).isoformat()
-    return ""
 
 
 class NaukriBot(BaseSiteBot):

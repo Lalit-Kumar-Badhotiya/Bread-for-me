@@ -23,7 +23,7 @@ limits:
 # Daily caps per site. enabled=false = skipped; flip on phase by phase.
 sites:
   naukri:      { enabled: true,  daily_cap: 10, max_titles_per_run: 3 }
-  wellfound:   { enabled: false, daily_cap: 6 }
+  wellfound:   { enabled: true,  daily_cap: 6, max_titles_per_run: 3 }
   indeed:      { enabled: false, daily_cap: 5 }
   glassdoor:   { enabled: false, daily_cap: 4 }
   simplyhired: { enabled: false, daily_cap: 3 }
