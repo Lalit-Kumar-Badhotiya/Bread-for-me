@@ -29,9 +29,12 @@ limits:
 #   naukri    uses -2/-3 URL suffixes (live-verified)
 #   glassdoor uses _IP2/_IP3 suffixes + the entry-level filter (live-verified)
 #   indeed    entry-level filter only; its pagination hits a login wall
+# wellfound cards often omit experience/skills: such rows queue tentatively
+# and get a full-page check right before applying (1+ years or a missing
+# must-have skill -> skipped, never submitted).
 sites:
   naukri:      { enabled: true,  daily_cap: 10, max_titles_per_run: 10, pages_per_title: 2 }
-  wellfound:   { enabled: true,  daily_cap: 6, max_titles_per_run: 3 }
+  wellfound:   { enabled: true,  daily_cap: 6, max_titles_per_run: 3, verify_on_detail: true }
   indeed:      { enabled: true,  daily_cap: 5, max_titles_per_run: 2 }
   glassdoor:   { enabled: true,  daily_cap: 4, max_titles_per_run: 2, pages_per_title: 2 }
   simplyhired: { enabled: true,  daily_cap: 3, max_titles_per_run: 2 }

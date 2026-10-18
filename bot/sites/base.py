@@ -723,7 +723,7 @@ class BaseSiteBot:
         command so both paths behave identically).
         """
         from ..scorer import rescore_pending
-        return rescore_pending(self.tracker, self.targets)
+        return rescore_pending(self.tracker, self.targets, self.settings)
 
     def fetch_and_rescore(self, page: Page) -> int:
         n = self.fetch_new_jobs(page)

@@ -111,8 +111,11 @@ def score_job(title, company, location, description, posted_date, targets):
             return 0, [f"experience: needs {min(over):g}+ yrs "
                        f"(band '{band}' allows {max_min:g})"], True
     if targets.get("fresher_signal_required") and not _FRESHER_SIGNAL_RX.search(blob):
-        return 0, ["experience: no fresher signal on the posting "
-                   "(fresher_signal_required: true)"], True
+        if targets.get("verify_on_detail"):
+            reasons.append("experience: unknown on the card - verify on the detail page")
+        else:
+            return 0, ["experience: no fresher signal on the posting "
+                       "(fresher_signal_required: true)"], True
     if seen_years:
         reasons.append(f"experience ok (min {min(seen_years):g} yr)")
 
@@ -134,13 +137,19 @@ def score_job(title, company, location, description, posted_date, targets):
                     reasons.append(f"title: loose ({t})")
                     break
 
-    # 2) must-have skills — ALL required (when configured)
+    # 2) must-have skills — ALL required (when configured). Sites with
+    #    verify_on_detail list cards that omit skills entirely; those only see
+    #    the final check on the job page right before applying.
     missing = [s for s in must_cfg if s not in blob]
-    if must_cfg and missing:
-        return 0, reasons + [f"missing must-have: {missing[0]}", "..."], True
     if must_cfg:
+        if missing and not targets.get("verify_on_detail"):
+            return 0, reasons + [f"missing must-have: {missing[0]}", "..."], True
         score += 40
-        reasons.append(f"must-have skills: all {len(must_cfg)}")
+        if missing:
+            reasons.append(f"skills: '{missing[0]}' not shown on the card - "
+                           "verify on the detail page")
+        else:
+            reasons.append(f"must-have skills: all {len(must_cfg)}")
 
     # 3) bonus skills
     bonus = [s.lower() for s in _norm_list(targets.get("bonus_skills"))]
@@ -170,20 +179,73 @@ def score_job(title, company, location, description, posted_date, targets):
     return min(score, 100), reasons, False
 
 
-def rescore_pending(tracker, targets) -> int:
+def experience_verdict(text: str, targets: dict) -> tuple[bool, str]:
+    """Apply-time experience gate for full pages (cards may hide experience).
+
+    The hard rule: skip when the text states a requirement above the band
+    limit (the 'never apply to an experienced-only posting' guarantee). No
+    explicit requirement is fine here — the card was already vetted, and the
+    detail page is the last checkpoint.
+
+    Returns (ok_to_apply, reason).
+    """
+    band = str(targets.get("experience_band") or "").strip().lower()
+    limit = BAND_LIMITS.get(band)
+    seen = _min_years_required(text or "")
+    if limit is not None:
+        over = [x for x in seen if x > limit]
+        if over:
+            return (False, f"experience: detail page needs {min(over):g}+ yrs "
+                           f"(band '{band}' allows {limit:g}) - not applied")
+    if _FRESHER_SIGNAL_RX.search(text or ""):
+        return True, "detail page: fresher signal"
+    if seen:
+        return True, f"detail page: needs {min(seen):g} yrs - within band"
+    return True, "detail page: no experience requirement stated"
+
+
+def detail_verdict(text: str, targets: dict) -> tuple[bool, str]:
+    """Final gate right before submitting, for cards that showed no details.
+
+    Enforces both hard rules on the full job page:
+      1. never apply when it states more years than the band allows;
+      2. never apply when the must-have skills are genuinely absent.
+    Returns (ok_to_apply, reason). Used by sites with verify_on_detail.
+    """
+    ok, why = experience_verdict(text, targets)
+    if not ok:
+        return False, why
+    blob = (text or "").lower()
+    missing = [s.lower() for s in _norm_list(targets.get("must_have_skills"))
+               if s.lower() not in blob]
+    if missing:
+        return False, f"skills: detail page never mentions must-have '{missing[0]}'"
+    return True, why
+
+
+def rescore_pending(tracker, targets, settings=None) -> int:
     """Re-evaluate every pending row against the CURRENT targets.yaml.
 
     Keeps the queue honest when you edit targets between runs: jobs you now
     exclude drop out, jobs that now qualify (older fetches say) come in.
     Applied/needs_you/failed rows are never touched. Used by the bots'
     fetch() and by `python run_apply.py rescore`.
+
+    Sites with `verify_on_detail: true` in settings keep rows whose cards
+    omit experience/skills queued (the detail-page check runs right before
+    applying).
     """
+    sites_cfg = (settings or {}).get("sites") or {}
     min_score = int(targets.get("min_score", 70))
     changed = 0
     for row in tracker.rescorable_rows():
+        t = targets
+        if (sites_cfg.get(row["source"]) or {}).get("verify_on_detail"):
+            t = dict(targets)
+            t["verify_on_detail"] = True
         score, reasons, reject = score_job(
             row["title"], row["company"], row["location"],
-            row["description"], row["posted_date"] or "", targets)
+            row["description"], row["posted_date"] or "", t)
         status = "skipped" if (reject or score < min_score) else "queued"
         if status != row["status"] or score != row["score"]:
             tracker.rescore(row["id"], score, "; ".join(reasons)[:200],

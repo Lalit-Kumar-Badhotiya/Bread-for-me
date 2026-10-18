@@ -248,7 +248,7 @@ def cmd_rescore(args):
     notifier = Notifier(settings)
     from bot.scorer import rescore_pending
     before = len(tracker.queued(limit=None))
-    changed = rescore_pending(tracker, targets)
+    changed = rescore_pending(tracker, targets, settings)
     after = len(tracker.queued(limit=None))
     notifier.send(f"rescore: {changed} row(s) re-classified against current "
                   f"targets; queue {before} -> {after}")

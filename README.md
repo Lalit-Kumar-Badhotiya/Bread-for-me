@@ -84,6 +84,12 @@ and presses the chat's Save only once it unlocks. Questions it cannot answer
 return `needs_you` with the exact wording, so the screener learning loop can
 capture them for next time.
 
+Wellfound cards are sparse (often no experience, no skills, sometimes not even
+the company). With `sites.wellfound.verify_on_detail: true` those rows queue
+tentatively and get a final check on the full job page right before applying:
+if the page states more years than your band allows, or never mentions a
+must-have skill, the job is skipped and never submitted (screenshot saved).
+
 ## Status / roadmap
 
 - [x] P0: scaffolding, tracker, scorer, answers, notifier, configs
