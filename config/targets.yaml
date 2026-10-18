@@ -51,5 +51,5 @@ locations:               # "delhi" also matches New Delhi/Gurugram/Noida via sub
   - mathura
   - remote
 
-min_score: 70            # queue threshold; drop to 60-65 if queue feels too small
+min_score: 65            # queue threshold; drop to 60-65 if queue feels too small
 max_age_days: 7

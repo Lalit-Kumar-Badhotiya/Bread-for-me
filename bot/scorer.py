@@ -48,7 +48,7 @@ def score_job(title, company, location, description, posted_date, targets):
     #    title alone carries more weight so the threshold stays reachable.
     must_cfg = [s.lower() for s in _norm_list(targets.get("must_have_skills"))]
     titles = [t.lower() for t in _norm_list(targets.get("titles"))]
-    title_weight = 40 if must_cfg else 55
+    title_weight = 40 if must_cfg else 62
     if titles:
         if any(t in title_l for t in titles):
             score += title_weight
