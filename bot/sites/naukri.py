@@ -85,6 +85,17 @@ class NaukriBot(BaseSiteBot):
         self.CONFIRM_HINTS = tuple(self.CONFIRM_HINTS) + CONFIRM_HINTS_EXTRA
 
     # ================================================================== FETCH
+    def _search_urls(self, title: str) -> list[str]:
+        """Naukri paginates listing pages with a -2, -3... URL suffix
+        (verified live: -2 returns a fresh card set). The ?experience= param
+        is ignored on these pages, so fresher filtering stays in the scorer."""
+        slug = slugify(title)
+        if not slug:
+            return []
+        pages = max(1, int(self.cfg.get("pages_per_title", 1)))
+        return [f"{self.home}/{slug}-jobs" if p == 1
+                else f"{self.home}/{slug}-jobs-{p}" for p in range(1, pages + 1)]
+
     def fetch_new_jobs(self, page: Page) -> int:
         titles = [t.strip() for t in (self.targets.get("titles") or []) if t.strip()]
         if not titles:
@@ -94,38 +105,41 @@ class NaukriBot(BaseSiteBot):
         max_titles = int(self.cfg.get("max_titles_per_run", 3))
         total = 0
         for title in titles[:max_titles]:
-            slug = slugify(title)
-            if not slug:
-                continue
-            url = f"{self.home}/{slug}-jobs"
-            try:
-                page.goto(url, wait_until="domcontentloaded", timeout=45000)
-            except Exception as e:
-                self.notify.send(f"[naukri] goto failed ({url}): {type(e).__name__}")
-                continue
-            # clouds/interstitials: give the listing anchor some time to appear
-            try:
-                page.wait_for_selector('a[href*="job-listings-"]', timeout=15000)
-            except Exception:
-                pass
-            page.wait_for_timeout(1500)
-            self._dismiss_overlays(page)
-            items = page.evaluate(GATHER_JS)
-            self.notify.send(f"[naukri] '{title}': {len(items)} cards harvested")
-            if not items:
-                head = ""
-                try:
-                    head = page.content()[:200].lower()
-                except Exception:
-                    pass
-                self.notify.send(f"[naukri] 0 cards for '{title}' | page head: {head!r}")
+            urls = self._search_urls(title)
+            if not urls:
                 continue
             new = 0
-            for item in items:
-                if self._classify(item):
-                    new += 1
+            for pageno, url in enumerate(urls, start=1):
+                try:
+                    page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                except Exception as e:
+                    self.notify.send(f"[naukri] goto failed ({url}): {type(e).__name__}")
+                    break
+                # clouds/interstitials: give the listing anchor some time to appear
+                try:
+                    page.wait_for_selector('a[href*="job-listings-"]', timeout=15000)
+                except Exception:
+                    pass
+                page.wait_for_timeout(1500)
+                self._dismiss_overlays(page)
+                items = page.evaluate(GATHER_JS)
+                self.notify.send(f"[naukri] '{title}' p{pageno}: "
+                                 f"{len(items)} cards harvested")
+                if not items:
+                    if pageno == 1:
+                        head = ""
+                        try:
+                            head = page.content()[:200].lower()
+                        except Exception:
+                            pass
+                        self.notify.send(f"[naukri] 0 cards for '{title}' | "
+                                         f"page head: {head!r}")
+                    break
+                for item in items:
+                    if self._classify(item):
+                        new += 1
+                time.sleep(3.0)
             total += new
-            time.sleep(3.0)
         return total
 
     def _classify(self, item: dict) -> bool:

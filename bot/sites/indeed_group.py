@@ -45,24 +45,27 @@ class IndeedGroupBot(BaseSiteBot):
 
     # ------------------------------------------------- shared harvester
     def harvest(self, page: Page, title: str) -> int:
-        """Visit search URL(s) and classify cards; returns newly queued."""
-        url = self.search_url_for(title)
-        if not url:
-            return 0
-        try:
-            page.goto(url, wait_until="domcontentloaded", timeout=45000)
-        except Exception as e:
-            self.notify.send(f"[{self.name}] goto failed ({url}): {type(e).__name__}")
-            return 0
-        try:
-            page.wait_for_selector(self.CARD_ANCHOR_SEL, timeout=15000)
-        except Exception:
-            pass
-        page.wait_for_timeout(2000)
-        items = page.evaluate(self.GATHER_JS)
-        self.notify.send(f"[{self.name}] '{title}': {len(items)} cards harvested")
-        if not items:
-            dump = page.evaluate("""
+        """Visit each search URL for this title (page 1..N) and classify."""
+        total = 0
+        for pageno, url in enumerate(self.search_urls_for(title), start=1):
+            if not url:
+                continue
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            except Exception as e:
+                self.notify.send(f"[{self.name}] goto failed ({url}): {type(e).__name__}")
+                break
+            try:
+                page.wait_for_selector(self.CARD_ANCHOR_SEL, timeout=15000)
+            except Exception:
+                pass
+            page.wait_for_timeout(2000)
+            items = page.evaluate(self.GATHER_JS)
+            self.notify.send(f"[{self.name}] '{title}' p{pageno}: "
+                             f"{len(items)} cards harvested")
+            if not items:
+                if pageno == 1:
+                    dump = page.evaluate("""
 () => {
   const set = new Set([...document.querySelectorAll('a')]
     .map(a => (a.href || '').split('#')[0])
@@ -70,7 +73,7 @@ class IndeedGroupBot(BaseSiteBot):
   return [...set].slice(0, 20);
 }
 """)
-            extra = page.evaluate("""
+                    extra = page.evaluate("""
 () => {
   const c = s => document.querySelectorAll(s).length;
   return `selectors: a[data-jk]=${c('a[data-jk]')} serpjob=${c('[class*="SerpJob"]')} `
@@ -79,13 +82,18 @@ class IndeedGroupBot(BaseSiteBot):
        + `text=${(document.body.innerText||'').slice(0,120).replace(/\\n/g,' | ')}`;
 }
 """)
-            self.notify.send(f"[{self.name}] 0 cards | {extra} | href dump: {dump}")
-            return 0
-        new = 0
-        for item in items:
-            if self._classify(item):
-                new += 1
-        return new
+                    self.notify.send(f"[{self.name}] 0 cards | {extra} | href dump: {dump}")
+                break
+            for item in items:
+                if self._classify(item):
+                    total += 1
+            self.human_pause(2.5, 5.0)
+        return total
+
+    def search_urls_for(self, title: str) -> list[str]:
+        """Search URLs to harvest for a title; subclasses override to paginate."""
+        url = self.search_url_for(title)
+        return [url] if url else []
 
     def search_url_for(self, title: str) -> str:
         raise NotImplementedError
@@ -207,7 +215,9 @@ class IndeedBot(IndeedGroupBot):
 
     def search_url_for(self, title: str) -> str:
         from urllib.parse import quote_plus
-        return f"{self.home}/jobs?q={quote_plus(title)}"
+        # explvl=entry_level verified live to change the result set. Pagination
+        # (&start=) redirects guests to the login wall — keep one page.
+        return f"{self.home}/jobs?q={quote_plus(title)}&explvl=entry_level"
 
     def fetch_new_jobs(self, page: Page) -> int:
         titles = [t.strip() for t in (self.targets.get("titles") or []) if t.strip()]
@@ -246,10 +256,21 @@ class GlassdoorBot(IndeedGroupBot):
 """
 
     def search_url_for(self, title: str) -> str:
+        return self.search_urls_for(title)[0]
+
+    def search_urls_for(self, title: str) -> list[str]:
+        """seniorityType=entrylevel changes the result set; pages paginate
+        with an _IP2/_IP3... suffix (both verified live)."""
         kw = title.strip().lower().replace(" ", "-")
         kw = re.sub(r"[^a-z0-9-]", "", kw)
         n = len(title.strip())
-        return f"{self.home}/Job/{kw}-jobs-SRCH_KO0,{n}.htm"
+        pages = max(1, int(self.cfg.get("pages_per_title", 1)))
+        urls = [f"{self.home}/Job/{kw}-jobs-SRCH_KO0,{n}.htm"
+                f"?seniorityType=entrylevel"]
+        for p in range(2, pages + 1):
+            urls.append(f"{self.home}/Job/{kw}-jobs-SRCH_KO0,{n}_IP{p}.htm"
+                        f"?seniorityType=entrylevel")
+        return urls
 
     def fetch_new_jobs(self, page: Page) -> int:
         titles = [t.strip() for t in (self.targets.get("titles") or []) if t.strip()]
