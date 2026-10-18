@@ -37,9 +37,14 @@ REGISTRY = {
                "https://www.naukri.com"),
     "wellfound": ("bot.sites.wellfound", "WellfoundBot",
                   "https://wellfound.com"),
-    # Phase 3 registrations (indeed group incl. glassdoor & simplyhired) land
-    # here. LinkedIn stays manual-by-design FOREVER and is never registered
-    # or automated.
+    # Indeed group: one parent company + shared anti-bot => shared budget
+    "indeed": ("bot.sites.indeed_group", "IndeedBot", "https://in.indeed.com"),
+    "glassdoor": ("bot.sites.indeed_group", "GlassdoorBot",
+                  "https://www.glassdoor.co.in"),
+    "simplyhired": ("bot.sites.indeed_group", "SimplyHiredBot",
+                    "https://www.simplyhired.co.in"),
+    # LinkedIn stays manual-by-design FOREVER and is never registered or
+    # automated.
 }
 
 

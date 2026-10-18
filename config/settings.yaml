@@ -17,6 +17,7 @@ pacing:
 
 limits:
   daily_total_cap: 20       # all sites combined (raises as trust builds)
+  indeed_group_cap: 8       # indeed+glassdoor+simplyhired COMBINED (one company/anti-bot)
   max_wizard_steps: 30      # safety stop inside an apply flow
   login_manual_wait_min: 10 # how long to wait while you log in manually
 
@@ -24,9 +25,9 @@ limits:
 sites:
   naukri:      { enabled: true,  daily_cap: 10, max_titles_per_run: 3 }
   wellfound:   { enabled: true,  daily_cap: 6, max_titles_per_run: 3 }
-  indeed:      { enabled: false, daily_cap: 5 }
-  glassdoor:   { enabled: false, daily_cap: 4 }
-  simplyhired: { enabled: false, daily_cap: 3 }
+  indeed:      { enabled: true,  daily_cap: 5, max_titles_per_run: 2 }
+  glassdoor:   { enabled: true,  daily_cap: 4, max_titles_per_run: 2 }
+  simplyhired: { enabled: true,  daily_cap: 3, max_titles_per_run: 2 }
   linkedin:    { enabled: false, daily_cap: 0, mode: "manual" }  # NEVER automated
 
 notify:

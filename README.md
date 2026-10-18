@@ -75,7 +75,7 @@ queue — your rejects become new `exclude_keywords`. Then start `apply`.
 - [x] P0: scaffolding, tracker, scorer, answers, notifier, configs
 - [x] P1: Naukri bot (fetch + apply)
 - [x] P2: Wellfound bot (fetch live-verified; one-click apply via wizard)
-- [ ] P3: Indeed group (indeed, glassdoor, simplyhired — one shared budget)
+- [x] P3: Indeed group (indeed, glassdoor, simplyhired — shared daily budget)
 - [x] LinkedIn: manual forever (by your decision) — never automated
 
 ## Notes on the rules
