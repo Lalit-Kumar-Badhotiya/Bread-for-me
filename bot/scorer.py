@@ -26,6 +26,24 @@ def _age_days(posted_date: str) -> float | None:
     return None  # unknown age -> neutral, not rejected
 
 
+def _band_reject(blob: str, band: str) -> bool:
+    """True if the posting's minimum-years exceed the user's target band."""
+    limits = {"fresher": 1, "junior": 3, "mid": 5}
+    max_min = limits.get((band or "").lower())
+    if max_min is None:
+        return False
+    mins: list[int] = []
+    for rx in (r"(\d+)\s*(?:to|–|-)\s*(\d+)\s*(?:years?|yrs?)",
+               r"(\d+)\s*yrs?\s*(?:to|–|-)\s*(\d+)\s*yrs?",
+               r"min(?:imum)?\s*:?\s*(\d+)\s*(?:years?|yrs?)"):
+        for m in re.finditer(rx, blob):
+            try:
+                mins.append(int(m.group(1)))
+            except ValueError:
+                pass
+    return any(x > max_min for x in mins)
+
+
 def _norm_list(xs):
     return [str(x).strip() for x in (xs or []) if str(x).strip()]
 
@@ -41,6 +59,10 @@ def score_job(title, company, location, description, posted_date, targets):
     for kw in _norm_list(targets.get("exclude_keywords")):
         if re.search(r"\b" + re.escape(kw.lower()) + r"\b", blob):
             return 0, [f"exclude: '{kw}'"], True
+
+    band = str(targets.get("experience_band") or "").strip().lower()
+    if _band_reject(blob, band):
+        return 0, [f"experience band: rejects {band}"], True
 
     title_l = (title or "").lower()
 

@@ -52,4 +52,5 @@ locations:               # "delhi" also matches New Delhi/Gurugram/Noida via sub
   - remote
 
 min_score: 65            # queue threshold; drop to 60-65 if queue feels too small
+experience_band: fresher # fresher=0-1, junior=0-3, mid=2-5 (posts above band rejected)
 max_age_days: 7
