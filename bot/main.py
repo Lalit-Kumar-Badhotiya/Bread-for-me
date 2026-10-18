@@ -136,8 +136,18 @@ def cmd_login(args):
 
 
 def cmd_fetch(args):
-    bot, tracker, notifier = get_bot(args.site, extra_titles=args.title)
-    n = bot.fetch_new_jobs()
+    settings = load_yaml(CFG_DIR / "settings.yaml")
+    bot, tracker, notifier = get_bot(args.site, extra_titles=args.title, settings=settings)
+    headless = bool(settings.get("run", {}).get("headless", False))
+    pw, ctx, page = open_session(args.site, headless)
+    try:
+        n = bot.fetch_new_jobs(page)
+    except Exception as e:
+        n = 0
+        notifier.send(f"[{args.site}] fetch failed: {type(e).__name__}: {e}", toast=True)
+    finally:
+        ctx.close()
+        pw.stop()
     queued = tracker.queued(source=args.site, limit=100000)
     notifier.send(f"[{args.site}] fetch done: {n} newly queued "
                   f"({len(queued)} in queue total)")
@@ -161,8 +171,26 @@ def cmd_apply(args):
 
 
 def cmd_run(args):
-    cmd_fetch(args)
-    cmd_apply(args)
+    settings, profile, targets, answers, tracker, notifier = shared()
+    bot, tracker, notifier2 = get_bot(args.site, extra_titles=args.title,
+                                      settings=settings, profile=profile,
+                                      targets=targets, answers_lib=answers,
+                                      tracker=tracker, notifier=notifier)
+    if not bot.in_business_hours() and not args.force:
+        print("Outside business hours (settings.run) — use --force to override.")
+        sys.exit(3)
+    headless = bool(settings.get("run", {}).get("headless", False))
+    pw, ctx, page = open_session(args.site, headless)
+    try:
+        n = bot.fetch_new_jobs(page)
+        bot.apply(page, max_apps=args.max)
+        queued = tracker.queued(source=args.site, limit=100000)
+        notifier2.send(f"[{args.site}] run done: fetched {n}, "
+                       f"applied today {tracker.applied_today(args.site)}, "
+                       f"queue {len(queued)}")
+    finally:
+        ctx.close()
+        pw.stop()
 
 
 def cmd_calibrate(args):
