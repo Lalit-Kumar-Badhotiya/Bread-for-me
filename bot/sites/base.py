@@ -17,6 +17,7 @@ LinkedIn stays MANUAL forever and is never part of this framework's apply
 engine (user decision).
 """
 import datetime as dt
+import json
 import random
 import re
 import time
@@ -260,7 +261,7 @@ class BaseSiteBot:
         if quota <= 0:
             self.notify.send(f"[{self.name}] no quota left today "
                              f"(applied today: {self.tracker.applied_today(self.name)}/{self.daily_cap})")
-            return
+            return 0
         jobs = self.tracker.queued(source=self.name, limit=quota)
         self.notify.send(f"[{self.name}] apply run: {len(jobs)} queued, quota {quota}")
         done = 0
@@ -302,6 +303,7 @@ class BaseSiteBot:
             self.human_pause()
         self.notify.send(f"[{self.name}] apply run finished: {done} processed "
                          f"(applied today: {self.tracker.applied_today(self.name)})")
+        return done
 
     # ==================================================== screener learning
     def _learn_from_leftover(self, job, note: str) -> bool:
@@ -584,6 +586,93 @@ class BaseSiteBot:
         """
         return None
 
+    def preflight(self, page: Page) -> bool | None:
+        """Cheap session check before a run: load home and ask the site's
+        logged_in_signal. None = unknown (site has no signal)."""
+        if not self.home:
+            return None
+        try:
+            page.goto(self.home, wait_until="domcontentloaded", timeout=45000)
+            page.wait_for_timeout(2000)
+        except Exception:
+            return None
+        try:
+            return self.logged_in_signal(page)
+        except Exception:
+            return None
+
+    def reconcile_check(self, page: Page, job) -> bool | None:
+        """Does the SITE itself confirm this job as applied?
+        True = yes / False = clearly not / None = can't tell."""
+        if self.applied_signal(page):
+            return True
+        try:
+            has_apply_btn = page.get_by_role(
+                "button",
+                name=re.compile(r"^(easy apply|quick apply|apply now|apply)$",
+                                re.I)).count() > 0
+        except Exception:
+            has_apply_btn = False
+        return False if has_apply_btn else None
+
+    @staticmethod
+    def _dead_listing_and_text(title: str, text: str) -> str | None:
+        """A not-found/expired listing page must never be judged as a job post."""
+        low = (text or "").lower()
+        title_l = (title or "").lower()
+        if ("job is ooo" in low or "it's not here" in low
+                or any(k in title_l for k in ("not found", "job is ooo",
+                                              "expired", "no longer available"))):
+            return "listing is dead (not-found/expired page)"
+        return None
+
+    def _dead_listing(self, page: Page, text: str) -> str | None:
+        try:
+            title = page.title() or ""
+        except Exception:
+            title = ""
+        return self._dead_listing_and_text(title, text)
+
+    def validate_dead_links(self, page: Page, limit: int = 8) -> int:
+        """Sweep the front of the queue for dead listings so they never eat an
+        apply slot. Only marks rows whose page clearly says gone; anything
+        uncertain is left alone. Returns the number of rows checked."""
+        if limit <= 0:
+            return 0
+        try:
+            rows = self.tracker.queued(source=self.name, limit=limit)
+        except Exception:
+            return 0
+        checked = 0
+        for job in rows:
+            try:
+                page.goto(job["url"], wait_until="domcontentloaded", timeout=45000)
+                page.wait_for_timeout(2200)
+                text = self._page_text(page)
+                reason = self._dead_listing(page, text)
+                if reason:
+                    self.tracker.set_status(job["id"], "skipped", reason)
+                    self.notify.send(f"[{self.name}] swept a dead listing: "
+                                     f"'{(job['title'] or '')[:44]}'")
+                checked += 1
+            except Exception:
+                continue
+        return checked
+
+    def log_unknown_questions(self, jid, questions) -> None:
+        """Park unknown screening questions for later batch-answering (handy
+        for --no-learn runs): data/logs/unknown_questions.jsonl"""
+        try:
+            path = SHOT_DIR.parent / "unknown_questions.jsonl"
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps({
+                    "ts": dt.datetime.now().isoformat(timespec="seconds"),
+                    "site": self.name, "job_id": jid,
+                    "questions": list(questions),
+                }, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
     def await_manual_login(self, page: Page) -> bool:
         minutes = int((self.settings.get("limits", {}) or {}).get("login_manual_wait_min", 10))
         self.notify.send(f"ACTION NEEDED — log in to {self.name} in the OPENED browser "
@@ -721,20 +810,27 @@ class BaseSiteBot:
         if self.chatbot_present(page):
             return self.chatbot_flow(page, jid)
         max_steps = int((self.settings.get("limits", {}) or {}).get("max_wizard_steps", 30))
+        budget = int((self.settings.get("limits", {}) or {}).get("per_job_budget_sec", 0) or 0)
+        deadline = (time.time() + budget) if budget else 0.0
         stall = 0
         quiet = 0
         for _step in range(max_steps):
+            if deadline and time.time() > deadline:
+                return ("needs_you", f"per-job time budget ({budget}s) exceeded",
+                        self.safe_shot(page, f"budget_{jid}"))
             target = self._resolve_form(page)
             progress = self._fill_pass(target)
             self.tick_declarations(target)
             self.upload_resume_once(target)
             leftover = self.required_leftover(target)
             if leftover and not progress:
+                self.log_unknown_questions(jid, leftover)
                 return ("needs_you", "needs your input: " + "; ".join(leftover[:4]),
                         self.safe_shot(page, f"stuck_{jid}"))
             if leftover and progress:
                 stall += 1
                 if stall > 2:
+                    self.log_unknown_questions(jid, leftover)
                     return ("needs_you", "partial: " + "; ".join(leftover[:3]),
                             self.safe_shot(page, f"stall_{jid}"))
             if progress:
@@ -904,16 +1000,9 @@ class BaseSiteBot:
             return ("needs_you", "job page did not render (details unverifiable)",
                     self.safe_shot(page, f"blank_{job['id']}"))
         # dead/expired listings must not be judged by their 404 chrome
-        try:
-            title_l = (page.title() or "").lower()
-        except Exception:
-            title_l = ""
-        low = (text or "").lower()
-        if ("job is ooo" in low or "it's not here" in low
-                or any(k in title_l for k in ("not found", "job is ooo",
-                                              "expired", "no longer available"))):
-            return ("skipped", "listing is dead (not-found/expired page)",
-                    self.safe_shot(page, f"dead_{job['id']}"))
+        dead = self._dead_listing(page, text)
+        if dead:
+            return ("skipped", dead, self.safe_shot(page, f"dead_{job['id']}"))
         from ..scorer import detail_verdict
         ok, why = detail_verdict(text, self.targets)
         if not ok:

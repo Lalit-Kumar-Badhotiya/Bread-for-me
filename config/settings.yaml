@@ -23,6 +23,9 @@ limits:
   indeed_group_cap: 8       # indeed+glassdoor+simplyhired COMBINED (one company/anti-bot)
   max_wizard_steps: 30      # safety stop inside an apply flow
   login_manual_wait_min: 10 # how long to wait while you log in manually
+  per_job_budget_sec: 300   # one apply flow may never exceed this wall-clock time
+  apply_chunk_size: 8       # process jobs in chunks; the browser is reopened between chunks
+  validate_after_fetch: 8   # after fetch, sweep this many top queue rows for dead listings (0=off)
 
 # Daily caps per site. enabled=false = skipped; flip on phase by phase.
 # pages_per_title (where supported) fetches listing pages 1..N for each title:

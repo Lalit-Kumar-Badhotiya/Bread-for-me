@@ -244,6 +244,40 @@ class Tracker:
             args.append(source)
         return self.con.execute(q, args).fetchone()["c"]
 
+    def retry_rows(self, source: str, *, reason: str | None = None,
+                   ids: list[int] | None = None,
+                   exclude: tuple[str, ...] = ("external apply flow",)) -> list:
+        """Requeue parked rows (needs_you/failed) for another attempt.
+
+        Safeguards: never touches applied/skipped rows; without explicit ids
+        it skips handoff rows ("external apply flow") since the bot cannot
+        finish those anyway."""
+        rows = self.con.execute(
+            "SELECT id, title, status_note FROM jobs WHERE source=? "
+            "AND status IN ('needs_you','failed')", (source,)).fetchall()
+        picked = []
+        for r in rows:
+            note = (r["status_note"] or "")
+            if ids and r["id"] not in ids:
+                continue
+            if reason and reason.lower() not in note.lower():
+                continue
+            if not ids and any(e.lower() in note.lower() for e in exclude):
+                continue
+            picked.append(r)
+        for r in picked:
+            self.con.execute("UPDATE jobs SET status='queued', status_note='' "
+                             "WHERE id=?", (r["id"],))
+        self.con.commit()
+        return picked
+
+    def add_note(self, job_id: int, text: str) -> None:
+        """Append an audit note to a row without changing its status."""
+        self.con.execute(
+            "UPDATE jobs SET status_note=TRIM(COALESCE(status_note,'') "
+            "|| ?) WHERE id=?", (f" | {text}", job_id))
+        self.con.commit()
+
     # ---------- events ----------
     def log_event(self, kind: str, message: str):
         self.con.execute("INSERT INTO events (ts, kind, message) VALUES (?,?,?)",

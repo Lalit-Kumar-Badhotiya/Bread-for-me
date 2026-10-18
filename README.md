@@ -56,7 +56,24 @@ python run_apply.py apply naukri --max 5
 # (use --no-learn with apply/run to disable this for unattended runs)
 # stats:
 python run_apply.py report
+# recovery + audit tools:
+python run_apply.py retry naukri                    # requeue parked needs_you/failed rows
+python run_apply.py retry indeed --id 123 --id 124  # or just specific rows
+python run_apply.py validate naukri                 # sweep top of queue for dead listings
+python run_apply.py reconcile                       # audit every applied row against the live site
 ```
+
+Idempotency guard: before clicking Apply the bot checks whether the site
+already shows an "Applied" state (crash between submit and record, or a manual
+application) and records it instead of re-submitting. Applied verdicts need a
+strong confirmation phrase (or the site's own applied state) — never just the
+absence of a form. `reconcile` double-checks every applied row against the
+site's own state and moves anything the site does not confirm to `needs_you`.
+Long sessions recycle the browser every `apply_chunk_size` jobs, each apply
+flow has a wall-clock budget (`per_job_budget_sec` -> needs_you), and `run`
+sweeps the top of the queue for dead listings after each fetch. Unanswered
+screening questions from `--no-learn` runs are parked in
+`data/logs/unknown_questions.jsonl` for later batch-answering.
 
 First 3–5 days: run `fetch` + `calibrate` only (no `apply`) and correct the
 queue — your rejects become new `exclude_keywords`. Then start `apply`.

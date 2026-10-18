@@ -150,6 +150,54 @@ def _safe_close(ctx, pw):
         pass
 
 
+def _preflight_or_exit(bot, page, ctx, pw, site, notifier):
+    """Stop before a run when the session is clearly logged out."""
+    try:
+        sig = bot.preflight(page)
+    except Exception:
+        sig = None
+    if sig is False:
+        print(f"[{site}] session looks logged OUT — run: "
+              f".venv\\Scripts\\python.exe run_apply.py login {site}")
+        notifier.send(f"[{site}] preflight: not logged in — stopping before "
+                      "wasting a run", toast=True)
+        _safe_close(ctx, pw)
+        sys.exit(4)
+
+
+def _apply_chunked(bot, settings, site, pw, ctx, page, max_apps):
+    """Run bot.apply in chunks, reopening the browser between chunks so long
+    sessions cannot degrade on one browser process. Returns the live
+    (pw, ctx, page) tuple (it may have been recycled)."""
+    chunk = int((settings.get("limits", {}) or {}).get("apply_chunk_size", 0) or 0)
+    if chunk <= 0:
+        bot.apply(page, max_apps=max_apps)
+        return pw, ctx, page
+    total = 0
+    while True:
+        left = None if max_apps is None else max_apps - total
+        if left is not None and left <= 0:
+            break
+        n = bot.apply(page, max_apps=min(chunk, left) if left is not None else chunk)
+        total += n
+        if n == 0 or bot.quota_left() <= 0:
+            break
+        _safe_close(ctx, pw)
+        headless = bool(settings.get("run", {}).get("headless", False))
+        pw, ctx, page = open_session(site, headless)
+        try:
+            sig = bot.preflight(page)
+        except Exception:
+            sig = None
+        if sig is False:
+            bot.notify.send(f"[{site}] session expired at a chunk boundary — "
+                            f"run: run_apply.py login {site}", toast=True)
+            break
+        bot.tracker.log_event("run", f"[{site}] browser recycled after "
+                                      f"{total} processed job(s)")
+    return pw, ctx, page
+
+
 def cmd_login(args):
     settings = load_yaml(CFG_DIR / "settings.yaml")
     _bot, tracker, notifier = get_bot(args.site)
@@ -200,7 +248,9 @@ def cmd_apply(args):
     headless = bool(settings.get("run", {}).get("headless", False))
     pw, ctx, page = open_session(args.site, headless)
     try:
-        bot.apply(page, max_apps=args.max)
+        _preflight_or_exit(bot, page, ctx, pw, args.site, notifier)
+        pw, ctx, page = _apply_chunked(bot, settings, args.site, pw, ctx, page,
+                                       args.max)
     finally:
         _safe_close(ctx, pw)
 
@@ -224,21 +274,33 @@ def cmd_run(args):
     pw, ctx, page = open_session(args.site, headless)
     errors: list[str] = []
     try:
+        _preflight_or_exit(bot, page, ctx, pw, args.site, notifier2)
         try:
             n = bot.fetch_and_rescore(page)
         except Exception as e:
             n = 0
             errors.append(f"fetch: {type(e).__name__}: {e}")
             notifier2.send(f"[{args.site}] fetch failed: {type(e).__name__}: {e}", toast=True)
+        swept = 0
+        vlimit = int((settings.get("limits", {}) or {}).get("validate_after_fetch", 0) or 0)
+        if vlimit > 0:
+            try:
+                swept = bot.validate_dead_links(page, limit=vlimit)
+            except Exception:
+                swept = 0
         try:
-            bot.apply(page, max_apps=args.max)
+            pw, ctx, page = _apply_chunked(bot, settings, args.site, pw, ctx, page,
+                                           args.max)
         except Exception as e:
             errors.append(f"apply: {type(e).__name__}: {e}")
             notifier2.send(f"[{args.site}] apply crashed: {type(e).__name__}: {e}", toast=True)
+            print(f"Resume any time with: .venv\\Scripts\\python.exe "
+                  f"run_apply.py run {args.site}")
         queued = tracker.queued(source=args.site, limit=100000)
         notifier2.send(f"[{args.site}] run done: fetched {n}, "
                        f"applied today {tracker.applied_today(args.site)}, "
                        f"queue {len(queued)}"
+                       + (f", swept {swept} dead" if vlimit > 0 else "")
                        + (f" | errors: {'; '.join(errors)}" if errors else ""))
     finally:
         _safe_close(ctx, pw)
@@ -273,6 +335,81 @@ def cmd_rescore(args):
     after = len(tracker.queued(limit=None))
     notifier.send(f"rescore: {changed} row(s) re-classified against current "
                   f"targets; queue {before} -> {after}")
+
+
+def cmd_retry(args):
+    """Requeue parked rows (needs_you/failed) so a fixed wizard can retry."""
+    settings, profile, targets, answers, tracker, notifier = shared()
+    picked = tracker.retry_rows(args.site, reason=args.reason,
+                                ids=list(args.id) if args.id else None)
+    if not picked:
+        print("nothing to retry (no needs_you/failed rows match)")
+        return
+    for r in picked:
+        print(f"  requeued [{r['id']}] {r['title'][:60]}")
+    notifier.send(f"[{args.site}] retry: {len(picked)} row(s) re-queued")
+    print(f"{len(picked)} row(s) back in the queue — run: "
+          f".venv\\Scripts\\python.exe run_apply.py run {args.site}")
+
+
+def cmd_validate(args):
+    """Sweep the front of the queue for dead/expired listings."""
+    settings, profile, targets, answers, tracker, notifier = shared()
+    bot, tracker, notifier = get_bot(args.site, settings=settings, profile=profile,
+                                     targets=targets, answers_lib=answers,
+                                     tracker=tracker, notifier=notifier)
+    headless = bool(settings.get("run", {}).get("headless", False))
+    pw, ctx, page = open_session(args.site, headless)
+    try:
+        n = bot.validate_dead_links(page, limit=args.limit)
+    finally:
+        _safe_close(ctx, pw)
+    print(f"checked {n} queued row(s) for {args.site} "
+          f"(dead ones were marked skipped)")
+
+
+def cmd_reconcile(args):
+    """Audit 'applied' rows against the site's own applied state."""
+    settings, profile, targets, answers, tracker, notifier = shared()
+    sites = [args.site] if getattr(args, "site", None) else \
+        ["naukri", "wellfound", "indeed", "glassdoor", "simplyhired"]
+    tally = {"confirmed": 0, "reset": 0, "unknown": 0}
+    for site in sites:
+        rows = tracker.con.execute(
+            "SELECT id, title, url FROM jobs WHERE source=? AND status='applied'",
+            (site,)).fetchall()
+        if not rows:
+            continue
+        bot, tracker, notifier = get_bot(site, settings=settings, profile=profile,
+                                         targets=targets, answers_lib=answers,
+                                         tracker=tracker, notifier=notifier)
+        headless = bool(settings.get("run", {}).get("headless", False))
+        pw, ctx, page = open_session(site, headless)
+        try:
+            for job in rows:
+                try:
+                    page.goto(job["url"], wait_until="domcontentloaded", timeout=45000)
+                    page.wait_for_timeout(3000)
+                    verdict = bot.reconcile_check(page, job)
+                except Exception:
+                    verdict = None
+                if verdict is True:
+                    tracker.add_note(job["id"], "reconciler: confirmed on site")
+                    tally["confirmed"] += 1
+                    print(f"  confirmed {site}: {job['title'][:52]}")
+                elif verdict is False:
+                    tracker.set_status(job["id"], "needs_you",
+                                       "reconciler: site shows NO applied state — verify")
+                    tally["reset"] += 1
+                    print(f"  RESET {site}: {job['title'][:52]} -> needs_you")
+                else:
+                    tally["unknown"] += 1
+                    print(f"  unclear {site}: {job['title'][:52]}")
+        finally:
+            _safe_close(ctx, pw)
+    notifier.send(f"reconcile done: {tally['confirmed']} confirmed, "
+                  f"{tally['reset']} reset to needs_you, {tally['unknown']} unclear")
+    print(tally)
 
 
 def cmd_report(args):
@@ -329,6 +466,26 @@ def main():
                    ).set_defaults(fn=cmd_rescore)
 
     sub.add_parser("report").set_defaults(fn=cmd_report)
+
+    p = sub.add_parser("retry",
+                       help="requeue parked rows (needs_you/failed) for another attempt")
+    p.add_argument("site")
+    p.add_argument("--reason", default=None,
+                   help="only rows whose note contains this text")
+    p.add_argument("--id", type=int, action="append", default=None,
+                   help="specific row id(s); repeatable")
+    p.set_defaults(fn=cmd_retry)
+
+    p = sub.add_parser("validate",
+                       help="sweep the front of the queue for dead listings")
+    p.add_argument("site")
+    p.add_argument("--limit", type=int, default=8)
+    p.set_defaults(fn=cmd_validate)
+
+    p = sub.add_parser("reconcile",
+                       help="audit applied rows against the site's own state")
+    p.add_argument("site", nargs="?", default=None)
+    p.set_defaults(fn=cmd_reconcile)
 
     args = ap.parse_args()
     args.fn(args)

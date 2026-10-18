@@ -147,6 +147,11 @@ class IndeedGroupBot(BaseSiteBot):
         gate = self.detail_gate(page, job)
         if gate:
             return gate
+        # idempotency: never re-submit something the site already shows as
+        # applied (a crash between submit and record, or a manual application)
+        if self.applied_signal(page):
+            return ("applied", "pre-check: site already shows applied state",
+                    self.safe_shot(page, f"preapplied_{job['id']}"))
         apply_loc = self.find_apply(
             page, self.APPLY_LOCATORS,
             role_rx=re.compile(r"^apply( now)?$", re.I))
@@ -182,6 +187,14 @@ class IndeedGroupBot(BaseSiteBot):
             return True if n == 0 else False
         except Exception:
             return None
+
+    def applied_signal(self, page: Page) -> bool:
+        """The apply button flips to a green 'Applied' once submitted."""
+        try:
+            loc = page.get_by_role("button", name=re.compile(r"^applied\b", re.I))
+            return bool(loc.count() and loc.first.is_visible())
+        except Exception:
+            return False
 
 
 class IndeedBot(IndeedGroupBot):
