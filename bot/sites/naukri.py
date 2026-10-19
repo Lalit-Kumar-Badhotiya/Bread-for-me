@@ -18,6 +18,28 @@ from .base import RESUME_PATH, BaseSiteBot, Page, posted_date_from_text
 CONFIRM_HINTS_EXTRA = ("you have applied", "your application has been sent",
                        "applied successfully", "has been sent to")
 
+# Some postings (consulting/training-farm style) route applications through a
+# web form ("Apply link: https://forms.gle/..."). The bot can never fill
+# those — park them as an external flow with the link instead of flailing
+# through the recruiter chat (found live 2026-10-19, jobs 267/426). Google
+# Forms dominate, but the same pattern shows up on Microsoft Forms, Typeform,
+# JotForm, Tally, Zoho and Airtable.
+FORM_LINK_RX = re.compile(
+    r"""https?://(?:
+            forms\.gle/ | docs\.google\.com/forms |
+            forms\.(?:office|microsoft)\.com/ |
+            [\w.-]*typeform\.com/ | [\w.-]*jotform\.com/ |
+            tally\.so/ | [\w.-]*zohopublic\.[a-z.]+/ |
+            airtable\.com/shr
+        )[^\s"'<>()]*""", re.I | re.X)
+
+# The recruiter chat rejects an answer with phrasing like "The input seems
+# invalid." — matched so the flow can try a variant instead of re-sending the
+# same rejected text (found live 2026-10-19, job 260 CTC=0 sent 3×).
+CHAT_INVALID_RX = re.compile(
+    r"(seems invalid|invalid input|invalid format|input is not valid|"
+    r"not a valid (?:input|value|number|response)|validation failed)", re.I)
+
 APPLY_LOCATORS = (
     'button:has-text("Apply")',
     'a:has-text("Apply")',
@@ -219,6 +241,11 @@ class NaukriBot(BaseSiteBot):
         self._dismiss_overlays(page)
         if self.applied_signal(page):
             return ("applied", "already applied on site (detected on job page)", "")
+        fl = self._external_form_link(page)
+        if fl:
+            host, url = fl
+            return ("needs_you", f"external apply flow ({host}): {url[:120]}",
+                    self.safe_shot(page, f"formlink_{job['id']}"))
         apply_loc = self.find_apply(
             page, self.APPLY_LOCATORS,
             role_rx=re.compile(r"^apply( now)?$", re.I))
@@ -237,26 +264,52 @@ class NaukriBot(BaseSiteBot):
     #     until the current step has been answered
     CHATBOT_BOX = '[id$="ChatbotContainer"]'
 
-    def chatbot_present(self, page: Page) -> bool:
-        """Visible when the chat footer / a chip / its text box is on screen.
+    # "is the chat open?" probe: ANY visible anchor counts. wait_for_selector
+    # resolves a selector list to the single FIRST element in document order —
+    # in radio-question states that first match sits hidden while the chat is
+    # clearly open, so the wizard never handed over (found live 2026-10-19,
+    # jobs 267/426: the resume got fed to the chat as a raw file input and
+    # naukri rejected it). Returns 'none' fast when no widget is on the page.
+    CHAT_VIS_JS = """
+    () => {
+      const box = document.querySelector('[id$="ChatbotContainer"]');
+      if (!box) return 'none';
+      const sels = ['.sendMsgbtn_container', 'div.chatbot_Chip',
+                    'div.textArea[contenteditable="true"]',
+                    'input[type=radio]'];
+      const vis = e => {
+        const r = e.getBoundingClientRect();
+        const st = getComputedStyle(e);
+        return r.width > 1 && r.height > 1
+               && st.visibility !== 'hidden' && st.display !== 'none';
+      };
+      return sels.some(s => [...box.querySelectorAll(s)].some(vis))
+             ? 'visible' : 'hidden';
+    }
+    """
 
-        The container element itself is position:fixed (offset checks lie).
-        Some steps make the SPA reload the page, tearing the widget down for a
-        moment — so retry across those races before declaring it gone.
-        """
-        vis = (f'{self.CHATBOT_BOX} .sendMsgbtn_container, '
-               f'{self.CHATBOT_BOX} div.chatbot_Chip, '
-               f'{self.CHATBOT_BOX} div.textArea[contenteditable="true"]')
-        for _ in range(3):
+    def chatbot_present(self, page: Page, quick: bool = False) -> bool:
+        """True when any chat anchor (footer, chip, input, radio card) is on
+        screen. `quick=True` = single probe (the wizard's per-step check);
+        otherwise the widget may be mid-render / mid-SPA-reload, so retry a
+        few times before declaring it gone."""
+        tries = 1 if quick else 4
+        for i in range(tries):
             try:
-                page.wait_for_selector(vis, timeout=4000, state="visible")
-                return True
+                state = page.evaluate(self.CHAT_VIS_JS)
             except Exception:
                 try:
                     if page.is_closed():
                         return False
                 except Exception:
                     return False
+                state = "none"
+            if state == "visible":
+                return True
+            if state == "none":   # no widget on the page at all
+                return False
+            if i + 1 < tries:
+                page.wait_for_timeout(2000)
         return False
 
     def _chat_state(self, page: Page):
@@ -270,6 +323,9 @@ class NaukriBot(BaseSiteBot):
         uploads = 0
         seen = None
         stall = 0
+        # last free-text answer we sent + alternates still worth trying when
+        # the chat replies "The input seems invalid." (question, tried, left)
+        sent: tuple[str, list[str], list[str]] | None = None
         for _ in range(max_steps):
             page.wait_for_timeout(1800)
             if self.applied_signal(page):
@@ -280,11 +336,43 @@ class NaukriBot(BaseSiteBot):
             st = self._chat_state(page)
             if st is None:
                 continue
+            fl = FORM_LINK_RX.search(st.get("text") or "")
+            if fl:
+                # recruiter wants an external form filled ("Kindly submit in
+                # the link...") — the bot can't do that; park with the link
+                url = fl.group(0)
+                host = (url.split("//", 1)[1].split("/", 1)[0]
+                        if "//" in url else "web form")
+                return ("needs_you",
+                        f"external apply flow ({host}): {url[:120]}",
+                        self.safe_shot(page, f"formlink_{jid}"))
             last_q = (st["botMsgs"][-1] if st["botMsgs"] else "")[:160]
+            if sent:
+                if CHAT_INVALID_RX.search(last_q):
+                    q0, tried, left = sent
+                    if left:
+                        nxt = left.pop(0)
+                        tried.append(nxt)
+                        if self._chat_send_text(page, nxt):
+                            sent = (q0, tried, left)
+                            continue
+                    # nothing left to try: park so the user can fix the answer
+                    self.log_unknown_questions(jid, [q0])
+                    tried_s = ", ".join(repr(t) for t in tried)
+                    return ("needs_you",
+                            f"needs your input: chat rejected '{q0}' "
+                            f"(tried {tried_s}) — edit answers.yaml, then retry",
+                            self.safe_shot(page, f"chatbad_{jid}"))
+                if last_q and last_q[:60] != sent[0][:60]:
+                    sent = None   # answer accepted; the conversation moved on
             sig = (tuple(st["chips"]), last_q, st["inputVisible"], len(st["radios"]))
             if sig == seen:
                 stall += 1
                 if stall >= 3:
+                    if last_q:
+                        # park it so `questions` can batch-answer it later
+                        # (chat unknowns never hit the wizard's leftover log)
+                        self.log_unknown_questions(jid, [last_q])
                     return ("needs_you", f"needs your input: {last_q}",
                             self.safe_shot(page, f"chatstuck_{jid}"))
             else:
@@ -318,6 +406,7 @@ class NaukriBot(BaseSiteBot):
             if st["inputVisible"] and last_q:
                 ans = self.answer_for(last_q)
                 if ans and self._chat_send_text(page, ans):
+                    sent = (last_q, [ans], self._chat_answer_variants(ans))
                     continue
 
             # 5) nothing to answer -> the footer button advances/submits
@@ -374,6 +463,19 @@ class NaukriBot(BaseSiteBot):
             except Exception:
                 continue
         return False
+
+    @staticmethod
+    def _chat_answer_variants(ans: str) -> list[str]:
+        """Alternate phrasings to try when the chat replies "The input seems
+        invalid." (observed on a numeric CTC question: '0' was rejected, so
+        try '0.0' / 'Fresher' before parking for the user)."""
+        a = (ans or "").strip()
+        out: list[str] = []
+        if re.fullmatch(r"\d+(?:\.\d+)?", a):
+            if "." not in a:
+                out.append(f"{a}.0")
+            out.append("Fresher")
+        return out
 
     def _chat_send_text(self, page: Page, text: str) -> bool:
         try:
@@ -465,6 +567,26 @@ class NaukriBot(BaseSiteBot):
         except Exception:
             return False
 
+    @staticmethod
+    def _external_form_link(page: Page) -> tuple[str, str] | None:
+        """(host, url) of a web-form apply link on the page, if any.
+
+        Nxtwave-style JDs carry 'Apply link: https://forms.gle/...' right in
+        the description — applying means filling that form manually, so the
+        honest outcome is a needs_you park with the link (never chased)."""
+        try:
+            m = FORM_LINK_RX.search(page.content() or "")
+        except Exception:
+            return None
+        if not m:
+            return None
+        url = m.group(0)
+        try:
+            host = url.split("//", 1)[1].split("/", 1)[0]
+        except Exception:
+            host = "web form"
+        return host, url
+
     def _login_needed(self, page: Page) -> bool:
         if super()._login_needed(page):
             return True
@@ -486,3 +608,28 @@ class NaukriBot(BaseSiteBot):
             return False
         except Exception:
             return None
+
+    # ------------------------------------------------ detail-gate page text
+    def _page_text(self, page: Page) -> str:
+        """Text handed to the apply-time detail gate.
+
+        The authoritative experience requirement lives in the JD header chip
+        ("3 - 8 years"), NOT in the description body, and the old
+        #jobDescriptionText id no longer exists on the current site — compose
+        header chip + JD content container, falling back to the full page text
+        if those selectors ever drift. (Found live 2026-10-19: a 3-8 years
+        posting was applied because only the card badge — which can go stale —
+        had ever been checked.)"""
+        try:
+            return page.evaluate("""() => {
+                const parts = [];
+                const add = (el) => { if (el && el.innerText) parts.push(el.innerText); };
+                add(document.querySelector('[class*="jhc__exp__"]'));
+                add(document.querySelector('[class*="jdc__content"]'));
+                add(document.querySelector('#jobDescriptionText'));
+                const joined = parts.join('\\n');
+                if (joined.length >= 400) return joined.slice(0, 15000);
+                return ((document.body && document.body.innerText) || '').slice(0, 15000);
+            }""") or ""
+        except Exception:
+            return ""

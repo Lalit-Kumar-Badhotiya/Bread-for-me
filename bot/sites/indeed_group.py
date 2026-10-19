@@ -24,10 +24,21 @@ class IndeedGroupBot(BaseSiteBot):
     group_members = ("indeed", "glassdoor", "simplyhired")
     # witch frame hosts the form (None = main page)
     FORM_FRAME_HINTS = ("gpi", "apply", "form", "iframe-apply")
+    # Scoped per-site selectors first (verified against the saved HTML dumps).
+    # The old generic text locators were removed here: `button:has-text("Apply")`
+    # matched glassdoor's "Easy Apply only" filter chip
+    # (data-test="applicationType") and sidebar "Easy Apply" cards, and
+    # `[data-testid*="apply"]` matched simplyhired's "similarJobsQuickApply"
+    # teasers — clicking those instead of the real button is what stalled
+    # the 2026-10-19 glassdoor runs (needs_you "no next/submit button found").
     APPLY_LOCATORS = (
         'button:has-text("Apply now")', 'a:has-text("Apply now")',
-        'button:has-text("Apply")', 'a:has-text("Apply")',
-        '[data-testid*="apply"]',
+        '[data-test="easyApply"]',              # glassdoor job page
+        '[data-test="applyButton"]',            # glassdoor search pane
+        '[data-testid="viewjob-apply"]',        # indeed job page
+        '[data-testid="primary-apply-action"]', # indeed (older layout)
+        '#indeedApplyButton',                   # indeed (classic layout)
+        '#viewJobHeaderFooterApplyButton',      # simplyhired
     )
     EXTERNAL_APPLY_GUARD = True
     # this group's apply flows legitimately hop to indeed's own hosted form

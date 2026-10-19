@@ -13,6 +13,7 @@ Commands:
   reconcile       audit applied rows against the sites' own state
   run-all         run every site in sequence (error-isolated)
   questions       review unanswered screening questions (learn into answers.yaml)
+  review          parked jobs grouped by reason (external flows, questions, captcha)
   export          applied jobs -> CSV + HTML (follow-ups/interview prep)
   report          today's stats across sites
 """
@@ -399,6 +400,11 @@ def cmd_run(args):
                                       settings=settings, profile=profile,
                                       targets=targets, answers_lib=answers,
                                       tracker=tracker, notifier=notifier)
+    if not bot.cfg.get("enabled", False):
+        print(f"'{args.site}' is disabled in config/settings.yaml "
+              "(enabled: false) — nothing to run.")
+        print("Flip it back to true when you want this site again.")
+        sys.exit(4)
     if getattr(args, "no_learn", False):
         bot.settings.setdefault("run", {})["interactive_learning"] = False
     if args.force:
@@ -554,6 +560,56 @@ def cmd_reconcile(args):
     print(tally)
 
 
+def _park_bucket(note: str) -> str:
+    n = (note or "").lower()
+    if n.startswith("external apply flow"):
+        return "external apply (manual link)"
+    if "needs your input" in n:
+        return "screening questions"
+    if "cloudflare" in n or "captcha" in n or "did not render" in n:
+        return "captcha / not rendered"
+    if "login" in n:
+        return "login"
+    return "other"
+
+
+def cmd_review(args):
+    """The manual-action shortlist: parked jobs grouped by reason.
+
+    needs_you/failed rows are what the bot deliberately did NOT finish —
+    external forms to fill by hand, questions to answer, captchas to click.
+    """
+    settings, profile, targets, answers, tracker, notifier = shared()
+    q = ("SELECT id, source, title, company, url, status, status_note "
+         "FROM jobs WHERE status IN ('needs_you','failed')")
+    params: list = []
+    if args.site:
+        q += " AND source = ?"
+        params.append(args.site)
+    q += " ORDER BY updated_at DESC"
+    rows = tracker.con.execute(q, params).fetchall()
+    buckets: dict[str, list] = {}
+    for r in rows:
+        buckets.setdefault(_park_bucket(r["status_note"]), []).append(r)
+    order = ["external apply (manual link)", "screening questions",
+             "captcha / not rendered", "login", "other"]
+    for name in order:
+        items = buckets.get(name) or []
+        if not items:
+            continue
+        print(f"\n== {name} ({len(items)}) ==")
+        for r in items[: max(1, args.limit)]:
+            note = " ".join((r["status_note"] or "").split())[:95]
+            print(f"  #{r['id']:<4} {r['source']:<11} "
+                  f"{str(r['title'] or '')[:46]:<46} | {note}")
+            if r["url"]:
+                print(f"        {r['url']}")
+    print(f"\n{len(rows)} parked row(s)"
+          + (f" for {args.site}" if args.site else "")
+          + ". Answer screening questions: "
+            ".venv\\Scripts\\python.exe run_apply.py questions")
+
+
 def cmd_questions(args):
     """Review screening questions parked by unattended (--no-learn) runs."""
     settings, profile, targets, answers_lib, tracker, notifier = shared()
@@ -622,10 +678,13 @@ def cmd_export(args):
 
 
 def cmd_run_all(args):
-    """Every site in sequence, error-isolated, one combined summary."""
+    """Every enabled site in sequence, error-isolated, one combined summary."""
     settings, profile, targets, answers, tracker, notifier = shared()
-    sites = args.sites or ["naukri", "wellfound", "glassdoor", "simplyhired",
-                           "indeed"]
+    order = ["naukri", "wellfound", "glassdoor", "simplyhired", "indeed"]
+    sites_cfg = settings.get("sites", {}) or {}
+    default = [s for s in order
+               if (sites_cfg.get(s, {}) or {}).get("enabled", False)]
+    sites = args.sites or default
     results = []
     for site in sites:
         sub = argparse.Namespace(site=site, max=args.max, force=args.force,
@@ -636,7 +695,7 @@ def cmd_run_all(args):
             results.append(f"{site}: done (applied today "
                            f"{tracker.applied_today(site)})")
         except SystemExit:
-            results.append(f"{site}: stopped early (hours/quota)")
+            results.append(f"{site}: stopped early (disabled, hours or quota)")
         except Exception as e:
             results.append(f"{site}: crashed — {type(e).__name__}: {e}")
     summary = " | ".join(results)
@@ -739,6 +798,13 @@ def main():
     p.add_argument("--list", action="store_true",
                    help="just list them; don't prompt")
     p.set_defaults(fn=cmd_questions)
+
+    p = sub.add_parser("review",
+                       help="parked jobs grouped by reason (manual-action shortlist)")
+    p.add_argument("site", nargs="?", default=None)
+    p.add_argument("--limit", type=int, default=100,
+                   help="max rows shown per category (default 100)")
+    p.set_defaults(fn=cmd_review)
 
     p = sub.add_parser("export", help="applied jobs -> CSV + HTML")
     p.add_argument("site", nargs="?", default=None)

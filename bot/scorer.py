@@ -97,9 +97,12 @@ def score_job(title, company, location, description, posted_date, targets):
     location_l = (location or "").lower()
     score = 0
 
-    # 0) hard excludes
+    # 0) hard excludes. Lookarounds instead of \b so keywords that start with
+    #    punctuation (".net", "12+ years") still match; the literal dot also
+    #    keeps common words (network, internet) from false-triggering on ".net".
     for kw in _norm_list(targets.get("exclude_keywords")):
-        if re.search(r"\b" + re.escape(kw.lower()) + r"\b", blob):
+        pat = (r"(?<![A-Za-z0-9])" + re.escape(kw.lower()) + r"(?![A-Za-z0-9])")
+        if re.search(pat, blob):
             return 0, [f"exclude: '{kw}'"], True
 
     band = str(targets.get("experience_band") or "").strip().lower()
@@ -261,10 +264,13 @@ def rescore_pending(tracker, targets, settings=None,
         if (not revive_gate_skips and row["status"] == "skipped"
                 and "detail page" in (row["status_note"] or "")):
             continue
-        t = targets
-        if (sites_cfg.get(row["source"]) or {}).get("verify_on_detail"):
-            t = dict(targets)
-            t["verify_on_detail"] = True
+        # The flag follows the ROW's own site, never the site whose fetch
+        # triggered this rescore: on 2026-10-19 a wellfound/indeed rescore
+        # re-queued 19 ineligible naukri rows with the lenient
+        # verify_on_detail behavior (and naukri's own rescore then undid it).
+        t = dict(targets)
+        t["verify_on_detail"] = bool(
+            (sites_cfg.get(row["source"]) or {}).get("verify_on_detail"))
         score, reasons, reject = score_job(
             row["title"], row["company"], row["location"],
             row["description"], row["posted_date"] or "", t)

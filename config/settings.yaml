@@ -1,8 +1,8 @@
 # ============================================================
 #  GLOBAL SETTINGS — tune behavior without touching code
-#  Load distribution: naukri is the volume engine, wellfound for
-#  startups, the indeed group shares one conservative budget
-#  (they run the same backend/anti-bot), linkedin stays MANUAL.
+#  Load distribution: naukri is the volume engine; the indeed group
+#  shares one conservative budget (they run the same backend/anti-bot),
+#  linkedin stays MANUAL. wellfound was removed 2026-10-19 (see below).
 # ============================================================
 
 run:
@@ -23,6 +23,8 @@ limits:
   indeed_group_cap: 8       # indeed+glassdoor+simplyhired COMBINED (one company/anti-bot)
   max_wizard_steps: 30      # safety stop inside an apply flow
   login_manual_wait_min: 10 # how long to wait while you log in manually
+  captcha_manual_wait_min: 5 # how long to wait while YOU click "Verify you
+                             # are human" (Cloudflare) in the open window
   per_job_budget_sec: 300   # one apply flow may never exceed this wall-clock time
   apply_chunk_size: 8       # process jobs in chunks; the browser is reopened between chunks
   validate_after_fetch: 8   # after fetch, sweep this many top queue rows for dead listings (0=off)
@@ -40,8 +42,15 @@ limits:
 # instead of bundled Chromium — needed where Cloudflare flags Chromium
 # (Indeed). The profile dir is the same, so logins stick.
 sites:
-  naukri:      { enabled: true,  daily_cap: 10, max_titles_per_run: 10, pages_per_title: 2 }
-  wellfound:   { enabled: true,  daily_cap: 6, max_titles_per_run: 3, verify_on_detail: true }
+  # naukri joined verify_on_detail on 2026-10-19: card badges can be stale and
+  # the JD header chip ("3 - 8 years") is the authoritative requirement.
+  naukri:      { enabled: true,  daily_cap: 10, max_titles_per_run: 10, pages_per_title: 2, verify_on_detail: true }
+  # REMOVED 2026-10-19: wellfound skews international (US/EU remote startups);
+  # 178 fetches yielded 0 applications, and the only jobs that reached the
+  # form were location-ineligible for an India profile (wellfound blocks the
+  # whole form: "does not support the locations or timezones"). Flip enabled
+  # back to true if you ever want it again — the code is still here.
+  wellfound:   { enabled: false, daily_cap: 6, max_titles_per_run: 3, verify_on_detail: true }
   indeed:      { enabled: true,  daily_cap: 5, max_titles_per_run: 10, browser_channel: chrome, verify_on_detail: true }
   glassdoor:   { enabled: true,  daily_cap: 4, max_titles_per_run: 10, pages_per_title: 1, browser_channel: chrome, verify_on_detail: true }
   simplyhired: { enabled: true,  daily_cap: 3, max_titles_per_run: 10, browser_channel: chrome, verify_on_detail: true }

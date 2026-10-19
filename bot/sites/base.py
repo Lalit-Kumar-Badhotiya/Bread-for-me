@@ -265,10 +265,27 @@ class BaseSiteBot:
         except Exception:
             return ""
 
-    @staticmethod
-    def _breaker_stepped(status: str, streak: int) -> int:
-        """Circuit breaker: count consecutive needs_you/failed outcomes."""
-        return streak + 1 if status in ("needs_you", "failed") else 0
+    # Park reasons that are EXPECTED outcomes rather than signs of a broken
+    # flow: a row of external-apply / captcha / parked-question jobs must not
+    # stop the run — the breaker is for the wizard itself failing repeatedly.
+    BENIGN_PARK_PREFIXES = (
+        "external apply flow",
+        "needs your input",
+        "cloudflare verification",
+        "manual login required",
+        "job page did not render",
+    )
+
+    @classmethod
+    def _breaker_stepped(cls, status: str, streak: int, note: str = "") -> int:
+        """Circuit breaker: count consecutive UNEXPECTED needs_you/failed
+        outcomes. Expected parks (external flows, captcha waits, parked
+        questions, manual login, unrendered pages) reset the streak instead."""
+        if status not in ("needs_you", "failed"):
+            return 0
+        if (note or "").lower().startswith(cls.BENIGN_PARK_PREFIXES):
+            return 0
+        return streak + 1
 
     # ================================================================ apply
     def apply(self, page: Page, max_apps: int | None = None):
@@ -328,6 +345,8 @@ class BaseSiteBot:
                 except Exception as e:
                     status, note = "failed", f"exception on retry: {type(e).__name__}: {e}"
                     shot = self.safe_shot(page, f"err_{job['id']}")
+            # drop any tabs this job spawned (career-page copies, form tabs)
+            self._close_extra_tabs(page)
             self.tracker.finish_application(app_id, status, note, shot)
             self.tracker.set_status(job["id"], status, note)
             if status in ("needs_you", "failed"):
@@ -335,7 +354,7 @@ class BaseSiteBot:
             self.notify.send(f"[{self.name}] {status.upper()} — '{(job['title'] or '')[:48]}' "
                              f"@ {(job['company'] or '')[:20]}" + (f" | {note}" if note else ""))
             done += 1
-            streak = self._breaker_stepped(status, streak)
+            streak = self._breaker_stepped(status, streak, note)
             if breaker and streak >= breaker:
                 self.notify.send(
                     f"[{self.name}] circuit breaker: {streak} jobs in a row did NOT "
@@ -546,23 +565,35 @@ class BaseSiteBot:
 
     @staticmethod
     def find_apply(page: Page, locators, role_rx=None):
+        """First VISIBLE match wins, per selector. Pages carry
+        responsive/hydration duplicate buttons where the first DOM match can
+        be a hidden twin — checking only `.first` used to skip the real
+        button (found live 2026-10-19 on glassdoor)."""
         for sel in locators:
             try:
-                loc = page.locator(sel).first
-                if loc.count() and loc.is_visible():
-                    return loc
+                loc = page.locator(sel)
+                for i in range(min(loc.count(), 12)):
+                    el = loc.nth(i)
+                    try:
+                        if el.is_visible():
+                            return el
+                    except Exception:
+                        continue
             except Exception:
                 continue
         if role_rx:
-            try:
-                loc = page.get_by_role("button", name=role_rx).first
-                if loc.count() and loc.is_visible():
-                    return loc
-                loc2 = page.get_by_role("link", name=role_rx).first
-                if loc2.count() and loc2.is_visible():
-                    return loc2
-            except Exception:
-                pass
+            for role in ("button", "link"):
+                try:
+                    loc = page.get_by_role(role, name=role_rx)
+                    for i in range(min(loc.count(), 12)):
+                        el = loc.nth(i)
+                        try:
+                            if el.is_visible():
+                                return el
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
         return None
 
     # ============================================================ wizard
@@ -736,6 +767,41 @@ class BaseSiteBot:
                 continue
         return False
 
+    # Cloudflare / Turnstile interstitial markers ("Additional Verification
+    # Required" page, seen on indeed). A human click clears it — poll while
+    # the user does, then let the flow continue on the rendered page.
+    CF_MARKERS = ("additional verification required", "verify you are human",
+                  "troubleshooting cloudflare errors")
+
+    def _cf_challenge(self, page: Page) -> bool:
+        try:
+            html = (page.content() or "").lower()
+        except Exception:
+            return False
+        return any(m in html for m in self.CF_MARKERS)
+
+    def await_manual_captcha(self, page: Page, job) -> bool:
+        """Pause while the user solves a Cloudflare 'verify you are human'
+        checkbox in the opened browser window (runs are watched,
+        headless: false). True as soon as the interstitial is gone."""
+        minutes = int((self.settings.get("limits", {}) or {})
+                      .get("captcha_manual_wait_min", 5))
+        self.notify.send(f"ACTION NEEDED — Cloudflare check on {self.name} "
+                         f"job {job['id']}: click 'Verify you are human' in "
+                         f"the browser window (waiting up to {minutes} min)",
+                         toast=True)
+        deadline = time.time() + minutes * 60
+        while time.time() < deadline:
+            try:
+                page.wait_for_timeout(4000)
+                if page.is_closed():
+                    return False
+                if not self._cf_challenge(page):
+                    return True
+            except Exception:
+                return False
+        return False
+
     def _confirmation_phrase(self, page: Page) -> str:
         """The matched confirmation phrase ("" when none). Reads VISIBLE text
         only — page.content() includes <script> JSON that false-matched."""
@@ -743,8 +809,25 @@ class BaseSiteBot:
             url_l = (page.url or "").lower()
         except Exception:
             url_l = ""
-        m = re.search(r"confirmation|complete", url_l)
+        # \b keeps "…/application-complete" but not "incomplete"-style URLs:
+        # a bare "complete" substring matched those before (found live
+        # 2026-10-19 on the simplyhired confirmation blanks).
+        m = re.search(r"confirmation|\bcomplet(?:e|ed)\b", url_l)
         if m:
+            # URL-only signals fire while the SPA may still be painting (the
+            # captured shot proved nothing) — give it a beat and prefer body
+            # evidence once it renders.
+            try:
+                page.wait_for_timeout(2500)
+            except Exception:
+                pass
+            try:
+                content = page.inner_text("body").lower()
+            except Exception:
+                content = ""
+            for h in self.CONFIRM_HINTS:
+                if h in content:
+                    return h
             return f"url contains '{m.group(0)}'"
         try:
             content = page.inner_text("body").lower()
@@ -785,14 +868,89 @@ class BaseSiteBot:
         return False
 
     # =============================================== chat-style apply flows
-    def chatbot_present(self, page: Page) -> bool:
-        """Site override: the Apply click opened a chat widget (no form)."""
+    def chatbot_present(self, page: Page, quick: bool = False) -> bool:
+        """Site override: the Apply click opened a chat widget (no form).
+
+        `quick=True` is the per-iteration probe inside the wizard loop: it
+        must answer fast (single look, no retry waits) so form jobs don't pay
+        a detection penalty on every step.
+        """
         return False
 
     def chatbot_flow(self, page: Page, jid) -> tuple[str, str, str]:
         """Site override: drive the chat widget from question to submission."""
         return ("needs_you", "chat-style apply flow is not supported here",
                 self.safe_shot(page, f"chat_{jid}"))
+
+    # ======================================================= tab management
+    @staticmethod
+    def _tab_list(page: Page) -> list:
+        try:
+            return list(page.context.pages)
+        except Exception:
+            return []
+
+    def _adopt_new_tab(self, page: Page, tabs_before: list):
+        """After a click, switch to a freshly opened tab if there is one.
+
+        Returns (page, followed). Late-arriving tabs are caught because the
+        wizard calls this again at the top of every step."""
+        try:
+            fresh = [p for p in page.context.pages
+                     if p not in tabs_before and not p.is_closed()]
+        except Exception:
+            fresh = []
+        if not fresh:
+            return page, False
+        newp = fresh[-1]
+        try:
+            newp.wait_for_load_state("domcontentloaded", timeout=20000)
+        except Exception:
+            pass
+        try:
+            newp.wait_for_timeout(1500)
+        except Exception:
+            pass
+        return newp, True
+
+    def _external_guard_block(self, page: Page, jid):
+        """Same-site allow-list check: a (needs_you, ...) tuple or None.
+
+        Shared by the initial apply click AND every later tab adoption, so an
+        external career page is parked the moment it appears instead of being
+        clicked again into duplicate tabs (found live 2026-10-19)."""
+        if not self.EXTERNAL_APPLY_GUARD:
+            return None
+        m = re.match(r"https?://([^/]+)", page.url or "")
+        host = m.group(1) if m else ""
+        if not host:
+            return None
+        fam = self._host_family(host)
+        home_fam = self._host_family(self.home)
+        allowed = fam == home_fam or fam.endswith("." + home_fam)
+        for a in self.ALLOWED_APPLY_FAMILIES:
+            if fam == a or fam.endswith("." + a):
+                allowed = True
+                break
+        if not allowed:
+            return ("needs_you", f"external apply flow ({host})",
+                    self.safe_shot(page, f"external_{jid}"))
+        return None
+
+    def _close_extra_tabs(self, root: Page) -> None:
+        """Close tabs this job spawned so long sessions don't pile up copies
+        of the same career page. Never touches the root page."""
+        try:
+            pages = list(root.context.pages)
+        except Exception:
+            return
+        for p in pages:
+            if p is root:
+                continue
+            try:
+                p.close()
+            except Exception:
+                continue
 
     def wizard(self, page: Page, jid, apply_loc) -> tuple[str, str, str]:
         """Generic apply flow from the Apply click to submission/confirmation.
@@ -801,11 +959,8 @@ class BaseSiteBot:
         the actual form target is resolved per-iteration via _resolve_form()
         so iframe-hosted flows work too.
         """
+        tabs_before: list = self._tab_list(page)
         if apply_loc:
-            try:
-                tabs_before = list(page.context.pages)
-            except Exception:
-                tabs_before = []
             try:
                 apply_loc.click(timeout=5000)
             except Exception as e:
@@ -814,32 +969,12 @@ class BaseSiteBot:
             page.wait_for_timeout(random.randint(1500, 3000))
             # "Apply"/"Apply Now ↗" often opens the real form in a NEW TAB
             # (glassdoor/simplyhired -> smartapply.indeed.com). Follow it.
-            try:
-                fresh = [p for p in page.context.pages if p not in tabs_before]
-            except Exception:
-                fresh = []
-            if fresh:
-                newp = fresh[-1]
-                try:
-                    newp.wait_for_load_state("domcontentloaded", timeout=20000)
-                except Exception:
-                    pass
-                newp.wait_for_timeout(1500)
-                page = newp
-            if self.EXTERNAL_APPLY_GUARD:
-                m = re.match(r"https?://([^/]+)", page.url or "")
-                host = m.group(1) if m else ""
-                if host:
-                    fam = self._host_family(host)
-                    home_fam = self._host_family(self.home)
-                    allowed = fam == home_fam or fam.endswith("." + home_fam)
-                    for a in self.ALLOWED_APPLY_FAMILIES:
-                        if fam == a or fam.endswith("." + a):
-                            allowed = True
-                            break
-                    if not allowed:
-                        return ("needs_you", f"external apply flow ({host})",
-                                self.safe_shot(page, f"external_{jid}"))
+            page, followed = self._adopt_new_tab(page, tabs_before)
+            if followed:
+                tabs_before = self._tab_list(page)
+            blocked = self._external_guard_block(page, jid)
+            if blocked:
+                return blocked
         if self._login_needed(page):
             if not self.await_manual_login(page):
                 return ("needs_you", "manual login required (timed out)",
@@ -863,6 +998,23 @@ class BaseSiteBot:
             if deadline and time.time() > deadline:
                 return ("needs_you", f"per-job time budget ({budget}s) exceeded",
                         self.safe_shot(page, f"budget_{jid}"))
+            # a previous click (or a late popup) may have opened a new tab:
+            # adopt it and re-check the external guard BEFORE clicking again,
+            # so we never re-click a button that spawns duplicate career-page
+            # tabs (found live 2026-10-19)
+            late_page, followed = self._adopt_new_tab(page, tabs_before)
+            if followed:
+                page = late_page
+                tabs_before = self._tab_list(page)
+                blocked = self._external_guard_block(page, jid)
+                if blocked:
+                    return blocked
+            if self.chatbot_present(page, quick=True):
+                # a chat widget opened (or was missed by the post-click race):
+                # hand over BEFORE the wizard touches its elements — a direct
+                # file-input upload here is rejected server-side and pollutes
+                # the conversation (found live 2026-10-19, naukri 267/426)
+                return self.chatbot_flow(page, jid)
             target = self._resolve_form(page)
             progress = self._fill_pass(target)
             self.tick_declarations(target)
@@ -1028,11 +1180,17 @@ class BaseSiteBot:
         text = ""
         # Cloudflare sometimes answers a job page with an "Additional
         # Verification Required" interstitial; a short wait + reload usually
-        # lets it pass. Give it up to two reloads before giving up.
+        # lets it pass — but a "Verify you are human" checkbox needs a click,
+        # so hand that over to the (watching) user before giving up.
         for attempt in range(3):
             text = self._page_text(page)
             if len((text or "").strip()) >= 300:
                 break
+            if self._cf_challenge(page):
+                if self.await_manual_captcha(page, job):
+                    continue  # solved -> re-read the rendered page
+                return ("needs_you", "Cloudflare verification not solved (manual)",
+                        self.safe_shot(page, f"captcha_{job['id']}"))
             if attempt == 2:
                 break
             try:

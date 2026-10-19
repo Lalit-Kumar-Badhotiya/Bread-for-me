@@ -1,9 +1,16 @@
 # Bread-for-me — Job Application Workflow (₹0, local, human-in-the-loop)
 
-Automated job-application assistants for Naukri (now live), Wellfound and the
-Indeed group (next phases), with a scoring engine that decides **which** roles
-to apply to, a cross-site dedupe tracker, a self-learning screener-answer
-library, and rate-capped human-like apply runs.
+Automated job-application assistants for Naukri (the volume engine) and the
+Indeed group (indeed, glassdoor, simplyhired — one shared budget), with a
+scoring engine that decides **which** roles to apply to, a cross-site dedupe
+tracker, a self-learning screener-answer library, and rate-capped human-like
+apply runs.
+
+Wellfound was **removed 2026-10-19**: ~180 fetches yielded 0 applications —
+the site skews to US/EU-remote startups, and the only postings that reached
+the form were location-ineligible for an India profile ("This job does not
+support the locations or timezones"). The code is still here, disabled via
+`enabled: false` in `config/settings.yaml`.
 
 **LinkedIn is manual by design, forever.** The bot may queue LinkedIn jobs for
 you in later phases, but no automation ever touches a LinkedIn session.
@@ -14,7 +21,9 @@ you in later phases, but no automation ever touches a LinkedIn session.
 1. **₹0 stack:** Python + Playwright + SQLite + free desktop notifications.
 2. **Human-in-the-loop:** CAPTCHA / OTP / unknown screening question / external
    apply flow → the app pauses as `needs_you`, pings you (desktop toast /
-   optional Telegram), saves a screenshot, and never blind-submitting.
+   optional Telegram), saves a screenshot, and never blind-submits. A Cloudflare
+   "verify you are human" page gets a real wait window (toast + up to
+   `captcha_manual_wait_min`) so you can click it while the run is watching.
 3. **Low & slow:** daily caps per site + a global cap, business-hours-only
    runs, randomized human-like delays. Aggressive autopilots get accounts
    flagged — this is built to age well.
@@ -63,7 +72,9 @@ python run_apply.py validate naukri                 # sweep top of queue for dea
 python run_apply.py reconcile                       # audit every applied row against the live site
 python run_apply.py run-all                         # every site in sequence, one summary
 python run_apply.py questions                       # answer parked screening questions (learns)
+python run_apply.py review                          # parked jobs grouped by reason (+ links)
 python run_apply.py export --open                   # applied jobs -> CSV + HTML
+python -m unittest discover -s tests -t . -v        # offline rule tests (no browser, no site)
 ```
 
 Idempotency guard: before clicking Apply the bot checks whether the site
@@ -78,7 +89,9 @@ sweeps the top of the queue for dead listings after each fetch. Unanswered
 screening questions from `--no-learn` runs are parked in
 `data/logs/unknown_questions.jsonl` for later batch-answering.
 A circuit breaker (`circuit_breaker_streak`) stops a run after N consecutive
-`needs_you`/`failed` jobs instead of burning through the whole queue. The
+*unexpected* `needs_you`/`failed` jobs instead of burning through the whole
+queue — expected parks (external apply flows, parked questions, captcha
+waits) don't count toward it. The
 apply loop skips near-duplicate cross-postings (same company+title on another
 site already applied to, or a stronger queued copy). `tracker.db` is backed up
 to `data/backups/` before mutating runs (newest 10 kept), zombie browser
@@ -100,6 +113,7 @@ queue — your rejects become new `exclude_keywords`. Then start `apply`.
 | `bot/answers.py` | screener Q/A library (learns from your answers) |
 | `bot/sites/base.py` | wizard engine + form filling shared by all sites |
 | `bot/sites/naukri.py` | Naukri fetch + apply (incl. the recruiter-chat apply flow) |
+| `tests/` | offline rule tests (scorer, answers, tracker, site helpers) |
 | `data/` | tracker.db, browser sessions, screenshots (gitignored) |
 | `data/logs/shots/` | screenshots for every `needs_you` pause |
 
@@ -108,24 +122,31 @@ recruiter chat instead of a form. The bot hands the resume over through its
 "Upload Resume" chip (setting the hidden file input directly gets rejected by
 the site), answers chips / radio options / free-text questions from
 `answers.yaml` + `profile.yaml`, tolerates the page reloads the chat triggers,
-and presses the chat's Save only once it unlocks. Questions it cannot answer
-return `needs_you` with the exact wording, so the screener learning loop can
-capture them for next time.
+and presses the chat's Save only once it unlocks. An answer the chat rejects
+("The input seems invalid.") is retried with a variant (e.g. `0` -> `0.0` ->
+`Fresher`), then parked for you if the chat keeps refusing. Postings that
+route applications through a web form (Google/Microsoft Forms, Typeform,
+JotForm, Tally, Zoho, Airtable — common with consultancy listings) are parked
+as external flows **with the link** instead of being chased. Questions the
+bot cannot answer return `needs_you` with the exact wording, so the screener
+learning loop can capture them for next time.
 
-Wellfound and Indeed cards are often sparse (no experience, no skills,
-sometimes not even the company). With `verify_on_detail: true` for such a
-site, the rows queue tentatively and get a final check on the full job page
-right before applying: if the page states more years than your band allows,
-or never mentions a must-have skill, the job is skipped and never submitted
+Indeed-group cards are often sparse (no experience, no skills, sometimes not
+even the company). With `verify_on_detail: true` for such a site, the rows
+queue tentatively and get a final check on the full job page right before
+applying: if the page states more years than your band allows, or never
+mentions a must-have skill, the job is skipped and never submitted
 (screenshot saved).
 
 ## Status / roadmap
 
 - [x] P0: scaffolding, tracker, scorer, answers, notifier, configs
 - [x] P1: Naukri bot (fetch + apply)
-- [x] P2: Wellfound bot (fetch live-verified; one-click apply via wizard)
+- [x] P2: Wellfound bot — REMOVED 2026-10-19 (international skew, 0 applies;
+      re-enable in settings.yaml if you ever want it back)
 - [x] P3: Indeed group (indeed, glassdoor, simplyhired — shared daily budget)
 - [x] LinkedIn: manual forever (by your decision) — never automated
+- [x] Tests: offline rule suite (`tests/`, stdlib unittest)
 
 ## Notes on the rules
 
