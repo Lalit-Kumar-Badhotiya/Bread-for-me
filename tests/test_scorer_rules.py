@@ -81,7 +81,13 @@ class VerdictTests(unittest.TestCase):
         self.assertTrue(ok)
 
     def test_detail_verdict_skills_gate(self):
-        ok, why = detail_verdict("Python developer, 0-1 years.", TARGETS)
+        # 2026-10-20 calibration: must-have-ANY gained python/java/sql from
+        # the resume, so a "Python developer" detail page passes the gate
+        # now — but a page with NONE of the must-have skills still fails.
+        ok, _ = detail_verdict("Python developer, 0-1 years.", TARGETS)
+        self.assertTrue(ok)
+
+        ok, why = detail_verdict("Frontend developer, 0-1 years, cta html.", TARGETS)
         self.assertFalse(ok)
         self.assertIn("none of", why)
 

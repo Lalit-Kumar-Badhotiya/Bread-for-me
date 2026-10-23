@@ -28,6 +28,7 @@ from playwright.sync_api import Page
 from ..answers import AnswerLibrary
 from ..notify import Notifier
 from ..tracker import Tracker
+from ..window import normalize_mode, set_window_state
 
 ROOT = Path(__file__).resolve().parents[2]
 SHOT_DIR = ROOT / "data" / "logs" / "shots"
@@ -749,23 +750,43 @@ class BaseSiteBot:
         except Exception:
             pass
 
+    # ---- quiet-run window control --------------------------------------
+    # settings.run.browser_window: minimized (default) — the browser borrows
+    # the taskbar instead of the screen; the two manual steps below pop the
+    # window back up and re-minimize it afterwards.
+    def _quiet_window(self, page: Page, state: str) -> None:
+        """Best-effort minimize/restore; no-op unless the run is in the
+        minimized window mode (and it just reports failure for a closed
+        window instead of raising)."""
+        try:
+            if normalize_mode(
+                    (self.settings.get("run") or {}).get("browser_window")
+            ) == "minimized":
+                set_window_state(page, state)
+        except Exception:
+            pass
+
     def await_manual_login(self, page: Page) -> bool:
         minutes = int((self.settings.get("limits", {}) or {}).get("login_manual_wait_min", 10))
+        self._quiet_window(page, "normal")  # quiet mode: pop up so the user can log in
         self.notify.send(f"ACTION NEEDED — log in to {self.name} in the OPENED browser "
                          f"window (waiting up to {minutes} min)", toast=True)
-        deadline = time.time() + minutes * 60
-        while time.time() < deadline:
-            page.wait_for_timeout(5000)
-            try:
-                if (re.search(LOGIN_URL_RX, page.url or "")
-                        or page.locator("input[type=password]:visible").count() > 0):
+        try:
+            deadline = time.time() + minutes * 60
+            while time.time() < deadline:
+                page.wait_for_timeout(5000)
+                try:
+                    if (re.search(LOGIN_URL_RX, page.url or "")
+                            or page.locator("input[type=password]:visible").count() > 0):
+                        continue
+                    if self.logged_in_signal(page) is False:
+                        continue
+                    return True
+                except Exception:
                     continue
-                if self.logged_in_signal(page) is False:
-                    continue
-                return True
-            except Exception:
-                continue
-        return False
+            return False
+        finally:
+            self._quiet_window(page, "minimized")  # taskbar again
 
     # Cloudflare / Turnstile interstitial markers ("Additional Verification
     # Required" page, seen on indeed). A human click clears it — poll while
@@ -782,25 +803,29 @@ class BaseSiteBot:
 
     def await_manual_captcha(self, page: Page, job) -> bool:
         """Pause while the user solves a Cloudflare 'verify you are human'
-        checkbox in the opened browser window (runs are watched,
-        headless: false). True as soon as the interstitial is gone."""
+        checkbox in the opened browser window (quiet runs pop the window up
+        for this step). True as soon as the interstitial is gone."""
         minutes = int((self.settings.get("limits", {}) or {})
                       .get("captcha_manual_wait_min", 5))
+        self._quiet_window(page, "normal")  # quiet mode: the click is manual
         self.notify.send(f"ACTION NEEDED — Cloudflare check on {self.name} "
                          f"job {job['id']}: click 'Verify you are human' in "
                          f"the browser window (waiting up to {minutes} min)",
                          toast=True)
-        deadline = time.time() + minutes * 60
-        while time.time() < deadline:
-            try:
-                page.wait_for_timeout(4000)
-                if page.is_closed():
+        try:
+            deadline = time.time() + minutes * 60
+            while time.time() < deadline:
+                try:
+                    page.wait_for_timeout(4000)
+                    if page.is_closed():
+                        return False
+                    if not self._cf_challenge(page):
+                        return True
+                except Exception:
                     return False
-                if not self._cf_challenge(page):
-                    return True
-            except Exception:
-                return False
-        return False
+            return False
+        finally:
+            self._quiet_window(page, "minimized")  # taskbar again
 
     def _confirmation_phrase(self, page: Page) -> str:
         """The matched confirmation phrase ("" when none). Reads VISIBLE text

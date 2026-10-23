@@ -16,9 +16,29 @@ titles:
   - Junior Software Engineer
   - SDE Intern
   - Software Engineer Intern
+  - Full Stack Developer
+  - Full Stack Engineer
+  - Frontend Developer
+  - Frontend Engineer
+  - React Developer
+  - Node.js Developer
+  - Python Developer
+  - Java Developer
+  - Associate Software Engineer
+  - Software Engineer Trainee
+  - MERN Stack Developer
+  - React.js Developer
+  - Node JS Developer
+  - Web Developer
+  - Application Developer
+  - Graduate Engineer Trainee
+  - Full Stack Web Developer
 
 must_have_skills: []  # AND-gate: posting must mention EVERY listed skill (empty = off)
-must_have_any: [javascript, typescript, node, react, express, next.js, nextjs]  # OR-gate from resume: posting must mention at least one of these
+# OR-gate from the resume: JS/TS + Node/React/Next, Python, Java, SQL/Postgres/
+# MySQL/Mongo, REST APIs. Python/Java/SQL were added on 2026-10-20 because the
+# strict JS-only gate was skipping most fresher backend listings.
+must_have_any: [javascript, typescript, node, react, express, next.js, nextjs, python, java, sql, postgresql, mysql, mongodb, rest api]
 
 bonus_skills:
   - python

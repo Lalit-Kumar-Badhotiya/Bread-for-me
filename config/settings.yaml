@@ -9,7 +9,13 @@ run:
   business_hours_only: true
   start_hour: 9        # applications happen between 9:00 and 19:00 local
   end_hour: 19
-  headless: false      # keep false so you can watch + intervene on CAPTCHA/OTP
+  headless: false      # keep false: headless windows can't be watched, don't
+                       # exist in the taskbar, and can't be repaired manually
+  browser_window: minimized  # Chrome launches minimized to the taskbar (no
+                             # screen takeover, never jumps monitors); it pops
+                             # up ONLY for login/Cloudflare steps and
+                             # re-minimizes itself after. "normal" = the old
+                             # always-visible behavior.
   interactive_learning: true  # wizard stuck on an unknown screening question? ask
                               # in the terminal, save it to answers.yaml, retry once
                               # (disable per-run with --no-learn for unattended runs)
@@ -19,8 +25,8 @@ pacing:
   max_action_delay_sec: 10
 
 limits:
-  daily_total_cap: 20       # all sites combined (raises as trust builds)
-  indeed_group_cap: 8       # indeed+glassdoor+simplyhired COMBINED (one company/anti-bot)
+  daily_total_cap: 80       # all sites combined (20 per enabled site)
+  indeed_group_cap: 60      # indeed+glassdoor+simplyhired COMBINED (20 each)
   max_wizard_steps: 30      # safety stop inside an apply flow
   login_manual_wait_min: 10 # how long to wait while you log in manually
   captcha_manual_wait_min: 5 # how long to wait while YOU click "Verify you
@@ -44,16 +50,16 @@ limits:
 sites:
   # naukri joined verify_on_detail on 2026-10-19: card badges can be stale and
   # the JD header chip ("3 - 8 years") is the authoritative requirement.
-  naukri:      { enabled: true,  daily_cap: 10, max_titles_per_run: 10, pages_per_title: 2, verify_on_detail: true }
+  naukri:      { enabled: true,  daily_cap: 20, max_titles_per_run: 30, pages_per_title: 3, verify_on_detail: true }
   # REMOVED 2026-10-19: wellfound skews international (US/EU remote startups);
   # 178 fetches yielded 0 applications, and the only jobs that reached the
   # form were location-ineligible for an India profile (wellfound blocks the
   # whole form: "does not support the locations or timezones"). Flip enabled
   # back to true if you ever want it again — the code is still here.
   wellfound:   { enabled: false, daily_cap: 6, max_titles_per_run: 3, verify_on_detail: true }
-  indeed:      { enabled: true,  daily_cap: 5, max_titles_per_run: 10, browser_channel: chrome, verify_on_detail: true }
-  glassdoor:   { enabled: true,  daily_cap: 4, max_titles_per_run: 10, pages_per_title: 1, browser_channel: chrome, verify_on_detail: true }
-  simplyhired: { enabled: true,  daily_cap: 3, max_titles_per_run: 10, browser_channel: chrome, verify_on_detail: true }
+  indeed:      { enabled: true,  daily_cap: 20, max_titles_per_run: 30, browser_channel: chrome, verify_on_detail: true }
+  glassdoor:   { enabled: true,  daily_cap: 20, max_titles_per_run: 30, pages_per_title: 2, browser_channel: chrome, verify_on_detail: true }
+  simplyhired: { enabled: true,  daily_cap: 20, max_titles_per_run: 30, browser_channel: chrome, verify_on_detail: true }
   linkedin:    { enabled: false, daily_cap: 0, mode: "manual" }  # NEVER automated
 
 notify:

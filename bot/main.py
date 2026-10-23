@@ -41,6 +41,7 @@ import yaml
 from bot.answers import AnswerLibrary
 from bot.notify import Notifier
 from bot.tracker import Tracker
+from bot.window import STEADY_ARGS, minimize_requested, set_window_state
 
 CFG_DIR = ROOT / "config"
 RESUME_PATH = ROOT / "resume" / "resume.pdf"
@@ -105,13 +106,17 @@ def get_bot(site: str, extra_titles=None, *, settings=None, profile=None,
                answers=answers_lib, notifier=notifier), tracker, notifier
 
 
-def open_session(site: str, headless: bool):
+def open_session(site: str, headless: bool, minimize: bool | None = None):
     """Launch persistent browser context; returns (playwright, context, page).
 
     settings.yaml may set sites.<site>.browser_channel ("chrome"/"msedge")
     to run that site in the installed browser instead of bundled Chromium —
     required for Cloudflare-protected sites like Indeed, which treat the
     bundled browser as a bot however human the user's actions are.
+
+    Quiet runs (run.browser_window: minimized, the default) send the window
+    straight to the taskbar; it pops back up only inside the bot's manual
+    steps (login / captcha) and re-minimizes itself after them.
     """
     from playwright.sync_api import sync_playwright
     state = ROOT / "data" / "state" / site
@@ -124,11 +129,15 @@ def open_session(site: str, headless: bool):
     extra = {"channel": channel} if channel else {}
     ctx = pw.chromium.launch_persistent_context(
         str(state), headless=headless,
-        args=["--disable-blink-features=AutomationControlled"], **extra)
+        args=["--disable-blink-features=AutomationControlled", *STEADY_ARGS], **extra)
     ctx.add_init_script(
         "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
     ctx.set_default_timeout(20000)
     page = ctx.pages[0] if ctx.pages else ctx.new_page()
+    if minimize is None:
+        minimize = minimize_requested(settings, headless)
+    if minimize:  # straight to the taskbar (~1s flash first, unavoidable)
+        set_window_state(page, "minimized")
     return pw, ctx, page
 
 
@@ -340,7 +349,8 @@ def cmd_login(args):
     settings = load_yaml(CFG_DIR / "settings.yaml")
     _bot, tracker, notifier = get_bot(args.site)
     headless = bool(settings.get("run", {}).get("headless", False))
-    pw, ctx, page = open_session(args.site, headless=False)  # login always headed
+    pw, ctx, page = open_session(args.site, headless=False, minimize=False)
+    # login always headed AND visible — this window exists for the user
     (_, _, home) = REGISTRY[args.site]
     try:
         page.goto(home, wait_until="domcontentloaded")
