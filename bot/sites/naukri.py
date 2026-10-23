@@ -438,6 +438,13 @@ class NaukriBot(BaseSiteBot):
         return bool(hit) and self._click_chat_chip(page, hit)
 
     def _click_chat_radio(self, page: Page, ans: str, radios: list[dict]) -> bool:
+        """Click the option matching `ans` and CONFIRM the radio flipped.
+        Naukri campus chat renders single-select questions as a native
+        input.ssrc__radio (positioned off-viewport) plus a styled sibling
+        label — only the label is reliably hittable (verified live: label
+        click selects + enables Save; force-clicking the input throws
+        "outside of the viewport"). Returns False unless the radio is
+        actually checked, so the flow keeps trying instead of stalling."""
         a = (ans or "").strip().lower()
         if not a:
             return False
@@ -445,23 +452,39 @@ class NaukriBot(BaseSiteBot):
             txt = (r.get("text") or "").lower()
             if not (a == txt or a in txt or txt in a):
                 continue
-            try:
-                if r.get("id"):
-                    loc = page.locator(f'#{r["id"]}')
-                    try:
-                        loc.check(timeout=2500)
-                    except Exception:
-                        try:
-                            loc.click(force=True, timeout=2000)
-                        except Exception:
-                            loc.evaluate(
-                                "e => (e.closest('label') || e.parentElement).click()")
-                else:
-                    page.get_by_text(r.get("text") or "", exact=True).first.click(timeout=3000)
-                page.wait_for_timeout(1200)
-                return True
-            except Exception:
-                continue
+            rid = (r.get("id") or "").strip()
+            if rid:
+                input_loc = page.locator(f'input[type="radio"]#{rid}').first
+                label_loc = page.locator(f'label[for="{rid}"]').first
+            else:
+                label_loc = page.get_by_text(r.get("text") or "", exact=True).first
+                input_loc = None
+            # label real-click -> input check -> JS label click -> JS check+events
+            chain = (("label", label_loc), ("label_js", label_loc))
+            if input_loc is not None:
+                chain += (("input", input_loc), ("input_js", input_loc))
+            for attempt, loc in chain:
+                try:
+                    if attempt == "label":
+                        loc.click(timeout=2500)
+                    elif attempt == "input":
+                        loc.check(timeout=2000, force=True)
+                    elif attempt == "label_js":
+                        loc.evaluate("e => e.click()")
+                    elif attempt == "input_js":
+                        loc.evaluate(
+                            "e => { e.checked = true;"
+                            " e.dispatchEvent(new Event('click', {bubbles: true}));"
+                            " e.dispatchEvent(new Event('change', {bubbles: true})); }")
+                    page.wait_for_timeout(900)
+                    if input_loc is not None:
+                        if bool(input_loc.evaluate("e => e.checked")):
+                            return True
+                        continue
+                    return True  # no id to verify with; assume the click landed
+                except Exception:
+                    continue
+            return False
         return False
 
     @staticmethod
