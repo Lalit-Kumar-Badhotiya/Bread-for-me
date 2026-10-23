@@ -246,12 +246,14 @@ class Tracker:
 
     def retry_rows(self, source: str, *, reason: str | None = None,
                    ids: list[int] | None = None,
-                   exclude: tuple[str, ...] = ("external apply flow",)) -> list:
+                   exclude: tuple[str, ...] = ("external apply flow",),
+                   include_external: bool = False) -> list:
         """Requeue parked rows (needs_you/failed) for another attempt.
 
         Safeguards: never touches applied/skipped rows; without explicit ids
-        it skips handoff rows ("external apply flow") since the bot cannot
-        finish those anyway."""
+        it skips handoff rows ("external apply flow") unless the caller asks
+        for them — external_autofill can now chase those, pass
+        include_external=True (CLI: retry <site> --include-external)."""
         rows = self.con.execute(
             "SELECT id, title, status_note FROM jobs WHERE source=? "
             "AND status IN ('needs_you','failed')", (source,)).fetchall()
@@ -262,8 +264,9 @@ class Tracker:
                 continue
             if reason and reason.lower() not in note.lower():
                 continue
-            if not ids and any(e.lower() in note.lower() for e in exclude):
-                continue
+            if not ids and not include_external:
+                if any(e.lower() in note.lower() for e in exclude):
+                    continue
             picked.append(r)
         for r in picked:
             self.con.execute("UPDATE jobs SET status='queued', status_note='' "

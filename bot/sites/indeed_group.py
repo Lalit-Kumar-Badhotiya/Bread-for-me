@@ -44,6 +44,11 @@ class IndeedGroupBot(BaseSiteBot):
     # this group's apply flows legitimately hop to indeed's own hosted form
     # (smartapply.indeed.com) — accept it and follow the new tab
     ALLOWED_APPLY_FAMILIES = ("indeed.com",)
+    # SmartApply's final module ("Voluntary self identification questions
+    # from the employer", seen live at 86% on job 2044) hides the wizard's
+    # next button behind a required "Agree to the privacy notice" checkbox —
+    # auto-tick declarations or the flow stalls "no next/submit button found".
+    DECLARATION_RX = re.compile(r"agree|consent|authoriz|privacy", re.I)
 
     # ------------------------------------------------- shared group quota
     def quota_left(self) -> int:
@@ -190,6 +195,24 @@ class IndeedGroupBot(BaseSiteBot):
         except Exception:
             pass
         return page
+
+    def dismiss_interstitial(self, page: Page) -> None:
+        """CookieOneTrust/CookiePro banners ("Accept All Cookies") sit above
+        the wizard's action buttons and swallow their click (seen live on
+        completed SmartApply pages, 2026-10-23). One click per visit."""
+        for sel in ('#onetrust-accept-btn-handler',
+                    '[id*="onetrust-accept"]',
+                    'button:has-text("Accept all cookies")',
+                    'button:has-text("Accept all")',
+                    'button:has-text("Accept All Cookies")'):
+            try:
+                loc = page.locator(sel).first
+                if loc.count() and loc.is_visible():
+                    loc.click(timeout=2500)
+                    page.wait_for_timeout(900)
+                    return
+            except Exception:
+                continue
 
     def logged_in_signal(self, page: Page) -> bool | None:
         try:

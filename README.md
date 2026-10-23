@@ -19,11 +19,16 @@ you in later phases, but no automation ever touches a LinkedIn session.
 ## Principles
 
 1. **₹0 stack:** Python + Playwright + SQLite + free desktop notifications.
-2. **Human-in-the-loop:** CAPTCHA / OTP / unknown screening question / external
-   apply flow → the app pauses as `needs_you`, pings you (desktop toast /
-   optional Telegram), saves a screenshot, and never blind-submits. A Cloudflare
-   "verify you are human" page gets a real wait window (toast + up to
-   `captcha_manual_wait_min`) so you can click it while the run is watching.
+2. **Human-in-the-loop:** CAPTCHA / OTP / unknown screening question → the app
+   pauses as `needs_you`, pings you (desktop toast / optional Telegram), saves a
+   screenshot, and never blind-submits. A Cloudflare "verify you are human"
+   page gets a real wait window (toast + up to `captcha_manual_wait_min`) so
+   you can click it while the run is watching. Apply flows that hop to a
+   company ATS (Lever, Greenhouse, Zoho, Workday, Darwinbox, Google Forms, …)
+   are now **autofilled automatically** (`run.external_autofill: true`); only
+   what cannot be filled, or pages gated behind an interactive CAPTCHA /
+   login, still park with the host named — a disabled submit button reports
+   exactly what is blocking it.
 3. **Low & slow:** daily caps per site + a global cap, business-hours-only
    runs, randomized human-like delays. Aggressive autopilots get accounts
    flagged — this is built to age well.
@@ -68,6 +73,7 @@ python run_apply.py report
 # recovery + audit tools:
 python run_apply.py retry naukri                    # requeue parked needs_you/failed rows
 python run_apply.py retry indeed --id 123 --id 124  # or just specific rows
+python run_apply.py retry naukri --include-external # also requeue external-ATS rows
 python run_apply.py validate naukri                 # sweep top of queue for dead listings
 python run_apply.py reconcile                       # audit every applied row against the live site
 python run_apply.py run-all                         # every site in sequence, one summary
@@ -122,7 +128,9 @@ queue — your rejects become new `exclude_keywords`. Then start `apply`.
 | `bot/answers.py` | screener Q/A library (learns from your answers) |
 | `bot/sites/base.py` | wizard engine + form filling shared by all sites |
 | `bot/sites/naukri.py` | Naukri fetch + apply (incl. the recruiter-chat apply flow) |
-| `tests/` | offline rule tests (scorer, answers, tracker, site helpers) |
+| `bot/sites/indeed_group.py` | Indeed/Glassdoor/SimplyHired shared budget + SmartApply flow |
+| `bot/ats.py` | external-ATS families + the safe-form probe driving the chase |
+| `tests/` | offline rule tests (scorer, answers, tracker, site helpers, ATS chase) |
 | `data/` | tracker.db, browser sessions, screenshots (gitignored) |
 | `data/logs/shots/` | screenshots for every `needs_you` pause |
 
@@ -134,10 +142,14 @@ the site), answers chips / radio options / free-text questions from
 and presses the chat's Save only once it unlocks. An answer the chat rejects
 ("The input seems invalid.") is retried with a variant (e.g. `0` -> `0.0` ->
 `Fresher`), then parked for you if the chat keeps refusing. Postings that
-route applications through a web form (Google/Microsoft Forms, Typeform,
-JotForm, Tally, Zoho, Airtable — common with consultancy listings) are parked
-as external flows **with the link** instead of being chased. Questions the
-bot cannot answer return `needs_you` with the exact wording, so the screener
+route applications through a web form (Google Forms, Typeform, JotForm,
+Tally, Zoho, Airtable, company ATS pages — common with consultancy listings)
+are **chased** with `run.external_autofill: true`: the bot follows the link /
+company-site hop and autofills the hosted application form with your profile
++ answers, submitting it when it can (confirmed live: a `forms.gle` chat link
+applied end-to-end). Un-fillable forms, ATS login walls and pages gated by an
+interactive CAPTCHA park with the host + exact blocker. Questions the bot
+cannot answer return `needs_you` with the exact wording, so the screener
 learning loop can capture them for next time.
 
 Indeed-group cards are often sparse (no experience, no skills, sometimes not

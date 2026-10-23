@@ -5,13 +5,16 @@ FETCH: browser session visits naukri.com/<slug>-jobs for each target title
 decides queued vs skipped.
 
 APPLY: job detail page -> Apply button -> base wizard engine. Naukri quirk:
-many cards are actually "apply on company site" external flows — those come
-back as needs_you with the link so you never apply twice by accident.
+many cards route the real application to "apply on company site" pages
+and web-form links — with run.external_autofill the bot follows them and
+autofills the hosted form (lever/zoho/workday/google-forms/...), parking
+only what it cannot fill or authenticate.
 Login (email/OTP) is manual-once, then the session persists.
 """
 import re
 import time
 
+from ..ats import ats_family
 from ..scorer import score_job
 from .base import RESUME_PATH, BaseSiteBot, Page, posted_date_from_text
 
@@ -19,11 +22,10 @@ CONFIRM_HINTS_EXTRA = ("you have applied", "your application has been sent",
                        "applied successfully", "has been sent to")
 
 # Some postings (consulting/training-farm style) route applications through a
-# web form ("Apply link: https://forms.gle/..."). The bot can never fill
-# those — park them as an external flow with the link instead of flailing
-# through the recruiter chat (found live 2026-10-19, jobs 267/426). Google
-# Forms dominate, but the same pattern shows up on Microsoft Forms, Typeform,
-# JotForm, Tally, Zoho and Airtable.
+# web form ("Apply link: https://forms.gle/..."). With run.external_autofill
+# on, the bot now CHASES that link and fills the hosted form (Google Forms,
+# Zoho, Typeform, JotForm, Tally and friends share the standard fields);
+# anything unfillable still parks as an external flow with the link.
 FORM_LINK_RX = re.compile(
     r"""https?://(?:
             forms\.gle/ | docs\.google\.com/forms |
@@ -244,8 +246,12 @@ class NaukriBot(BaseSiteBot):
         fl = self._external_form_link(page)
         if fl:
             host, url = fl
-            return ("needs_you", f"external apply flow ({host}): {url[:120]}",
-                    self.safe_shot(page, f"formlink_{job['id']}"))
+            block = self._external_autofill_or_park(page, job["id"], host, url=url)
+            if block:
+                return block
+            # chased the link (Google Form / Zoho / company ATS): the form
+            # loop self-reports failures with the benign external prefix
+            return self._form_loop(page, job["id"], self._tab_list(page))
         apply_loc = self.find_apply(
             page, self.APPLY_LOCATORS,
             role_rx=re.compile(r"^apply( now)?$", re.I))
@@ -339,13 +345,15 @@ class NaukriBot(BaseSiteBot):
             fl = FORM_LINK_RX.search(st.get("text") or "")
             if fl:
                 # recruiter wants an external form filled ("Kindly submit in
-                # the link...") — the bot can't do that; park with the link
+                # the link...") — chase it (Google Form / Zoho / company ATS)
+                # when external autofill is on; park with the link otherwise.
                 url = fl.group(0)
                 host = (url.split("//", 1)[1].split("/", 1)[0]
                         if "//" in url else "web form")
-                return ("needs_you",
-                        f"external apply flow ({host}): {url[:120]}",
-                        self.safe_shot(page, f"formlink_{jid}"))
+                block = self._external_autofill_or_park(page, jid, host, url=url)
+                if block:
+                    return block
+                return self._form_loop(page, jid, self._tab_list(page))
             last_q = (st["botMsgs"][-1] if st["botMsgs"] else "")[:160]
             if sent:
                 if CHAT_INVALID_RX.search(last_q):

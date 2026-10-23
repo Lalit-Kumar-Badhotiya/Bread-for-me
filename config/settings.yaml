@@ -19,6 +19,12 @@ run:
   interactive_learning: true  # wizard stuck on an unknown screening question? ask
                               # in the terminal, save it to answers.yaml, retry once
                               # (disable per-run with --no-learn for unattended runs)
+  external_autofill: true     # apply flows that hop to a company ATS (lever,
+                              # greenhouse, zohorecruit, workday, darwinbox,
+                              # google-forms, ...) or any page carrying a real
+                              # application form get autofilled automatically
+                              # instead of parking as "external apply flow".
+                              # Un-fillable ones still park with the reason.
 
 pacing:
   min_action_delay_sec: 4   # human-like random pauses between form actions

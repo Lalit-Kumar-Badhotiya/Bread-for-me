@@ -497,7 +497,8 @@ def cmd_retry(args):
     settings, profile, targets, answers, tracker, notifier = shared()
     _backup_db()
     picked = tracker.retry_rows(args.site, reason=args.reason,
-                                ids=list(args.id) if args.id else None)
+                                ids=list(args.id) if args.id else None,
+                                include_external=bool(args.include_external))
     if not picked:
         print("nothing to retry (no needs_you/failed rows match)")
         return
@@ -778,6 +779,9 @@ def main():
                    help="only rows whose note contains this text")
     p.add_argument("--id", type=int, action="append", default=None,
                    help="specific row id(s); repeatable")
+    p.add_argument("--include-external", action="store_true", default=False,
+                   help="also requeue 'external apply flow' rows (run."
+                        "external_autofill can now chase those)")
     p.set_defaults(fn=cmd_retry)
 
     p = sub.add_parser("validate",

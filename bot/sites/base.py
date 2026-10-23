@@ -29,6 +29,7 @@ from ..answers import AnswerLibrary
 from ..notify import Notifier
 from ..tracker import Tracker
 from ..window import normalize_mode, set_window_state
+from ..ats import ats_family, safe_from_probe, SAFE_FORM_JS
 
 ROOT = Path(__file__).resolve().parents[2]
 SHOT_DIR = ROOT / "data" / "logs" / "shots"
@@ -171,8 +172,24 @@ class BaseSiteBot:
     home = ""
     # subclass knobs ---------------------------------------------------------
     NEXT_PATTERNS = [r"^next$", r"^continue$", r"^next step", r"^continue to",
-                     r"^save and continue$", r"^save & continue$", r"^proceed"]
+                     r"^save and continue$", r"^save & continue$", r"^proceed",
+                     r"^review your application$", r"^review your answers$",
+                     r"^review application$"]
     SUBMIT_PATTERNS = [r"^submit application$", r"^submit", r"^apply now$", r"^apply$"]
+    # small-ATS listing pages host the real form behind a labelled entry
+    # button ("APPLY FOR THIS JOB" on lever job pages — found live 2026-10-23)
+    APPLY_PATTERNS = [r"^apply (?:for|to) th(?:is|e) job$", r"^apply for this job$",
+                      r"^apply now$", r"^apply here$", r"^apply to this position$"]
+    # post-submit wording that is extremely unlikely inside job description
+    # copy ("applications submitted after ..." would NOT match these tight,
+    # first-person phrases). Only scanned right after a submit click.
+    POST_SUBMIT_PHRASES = ("your application has been submitted",
+                           "your application was sent",
+                           "we've received your application",
+                           "we have received your application",
+                           "your application has been received",
+                           "thanks for applying",
+                           "thank you for applying")
     APPLY_LOCATORS = ('button:has-text("Apply")', 'a:has-text("Apply")',
                       'button:has-text("Apply now")', 'a:has-text("Apply now")')
     # Post-submit phrases ONLY. Generic ones ("your application", "thank you!",
@@ -462,8 +479,25 @@ class BaseSiteBot:
             return []
 
     def _resolve_form(self, page: Page):
-        """Where the apply form actually lives: main page by default; sites
-        whose apply flow is embedded in a child iframe override this."""
+        """Where the apply form actually lives: the main page when it carries
+        the controls, else the child iframe that hosts them (indeed-group
+        SmartApply + most external ATS embeds). Same behavior as before when
+        the main page holds the form — the frame search only runs when the
+        main page has fewer than 3 inputs."""
+        try:
+            if page.locator("input, select, textarea").count() >= 3:
+                return page
+        except Exception:
+            pass
+        try:
+            for frame in page.frames[1:]:
+                try:
+                    if frame.locator("input").count() >= 3:
+                        return frame
+                except Exception:
+                    continue
+        except Exception:
+            pass
         return page
 
     @staticmethod
@@ -866,6 +900,43 @@ class BaseSiteBot:
     def _at_confirmation(self, page: Page) -> bool:
         return bool(self._confirmation_phrase(page))
 
+    @classmethod
+    def _phrase_in(cls, text: str) -> str:
+        """First CONFIRM_HINTS present in arbitrary text (body/sample)."""
+        low = (text or "").lower()
+        for h in cls.CONFIRM_HINTS:
+            if h in low:
+                return h
+        for h in cls.POST_SUBMIT_PHRASES:
+            if h in low:
+                return h
+        return ""
+
+    @staticmethod
+    def _disabled_submit_probe(page: Page) -> dict | None:
+        """A visible but DISABLED submit-style button (and whether a
+        reCAPTCHA/consent widget is on the page). SmartApply review screens
+        disable 'Submit your application' until a human reCAPTCHA check or
+        a required acknowledgment is completed — found live 2026-10-23."""
+        for fr in page.frames:
+            try:
+                hit = fr.evaluate(
+                    "() => { const dis=[...document.querySelectorAll("
+                    "  'button:disabled, input[type=submit]:disabled, ' +"
+                    "  '[role=button][aria-disabled=\"true\"]')]"
+                    " .filter(e => e.offsetParent !== null && /submit|send|apply/i"
+                    "             .test(((e.innerText||e.value||'')+'').trim()));"
+                    " if (!dis.length) return null;"
+                    " const cap = document.querySelectorAll("
+                    "   'iframe[src*=\"recaptcha\"], .g-recaptcha, [class*=\"recaptcha\"]')"
+                    "   .length;"
+                    " return {blocked: dis.length, captcha: cap > 0}; }")
+                if hit:
+                    return hit
+            except Exception:
+                continue
+        return None
+
     @staticmethod
     def _host_family(host: str) -> str:
         """Normalize a host OR full URL for same-site comparison (drops
@@ -879,6 +950,110 @@ class BaseSiteBot:
         if len(labels) >= 3 and len(labels[0]) == 2:
             h = ".".join(labels[1:])
         return h
+
+    # ------------------------------------------------- external ATS chase
+    @staticmethod
+    def _url_host(url: str | None) -> str:
+        try:
+            m = re.match(r"https?://([^/?#]+)", url or "")
+            return (m.group(1) or "").lower() if m else ""
+        except Exception:
+            return ""
+
+    def _host_allowed(self, host: str) -> bool:
+        """Same-site (or shared-infra allow-list) membership for apply hops."""
+        fam = self._host_family(host)
+        home_fam = self._host_family(self.home)
+        if fam == home_fam or fam.endswith("." + home_fam):
+            return True
+        for a in self.ALLOWED_APPLY_FAMILIES:
+            if fam == a or fam.endswith("." + a):
+                return True
+        return False
+
+    @property
+    def external_autofill_enabled(self) -> bool:
+        """run.external_autofill (default true): when an apply flow hops to a
+        company ATS, try to fill that form automatically instead of parking."""
+        return bool((self.settings.get("run", {}) or {}).get("external_autofill", True))
+
+    def _safe_external_form(self, page: Page) -> bool:
+        """True when an external page unmistakably carries an application
+        form (resume slot / screeners / a full field set + a submit-ish
+        button). Deliberately rejects contact-form lookalikes (<=3 fields)."""
+        try:
+            return safe_from_probe(page.evaluate(SAFE_FORM_JS))
+        except Exception:
+            return False
+
+    def _external_autofill_or_park(self, page: Page, jid, host: str,
+                                   url: str | None = None):
+        """Decide the fate of an off-domain apply hop.
+
+        Returns None when the bot should TAKE OVER and fill the external
+        application form, or a ('needs_you', ...) park tuple when it can't.
+        Park wording keeps the 'external apply flow' prefix so the benign-
+        park circuit-breaker list and the default retry exclusion still
+        behave exactly as before."""
+        if not self.external_autofill_enabled:
+            return ("needs_you", f"external apply flow ({host})",
+                    self.safe_shot(page, f"external_{jid}"))
+        fam = ats_family(host)
+        if url:
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            except Exception as e:
+                self.notify.send(f"[{self.name}] external goto failed "
+                                 f"({host}): {type(e).__name__}")
+                return ("needs_you",
+                        f"external apply flow ({host}): {url[:120]}",
+                        self.safe_shot(page, f"formlink_{jid}"))
+            page.wait_for_timeout(2500)
+        if fam is None and not self._safe_external_form(page):
+            self.safe_html(page, f"extcold_{jid}")
+            return ("needs_you",
+                    f"external apply flow ({host}) — "
+                    "no application form detected on the page",
+                    self.safe_shot(page, f"external_{jid}"))
+        landed = self._url_host(page.url)
+        if landed and not ats_family(landed) and not self._host_allowed(landed):
+            # a redirect moved us somewhere else entirely (login portals,
+            # mail shares, trackers); only proceed if that page is a form
+            if not self._safe_external_form(page):
+                return ("needs_you",
+                        f"external apply flow ({landed or host})",
+                        self.safe_shot(page, f"external_{jid}"))
+        self.notify.send(f"[{self.name}] external ATS autofill: "
+                         f"{fam or 'generic form'} on {host}")
+        return None
+
+    @staticmethod
+    def _wrap_external_note(host: str, fam: str, result: tuple) -> tuple:
+        """After we ATTEMPT an external chase, failed parks keep the benign
+        'external apply flow' prefix (circuit breaker + retry exclusions)
+        while still carrying the real reason for diagnosis."""
+        status, note, shot = result
+        if status in ("needs_you", "failed") \
+                and not (note or "").lower().startswith("external apply flow"):
+            note = (f"external apply flow (attempted {fam} ATS: {host}): "
+                    f"{note}")[:240]
+        return (status, note, shot)
+
+    def _external_guard_block(self, page: Page, jid):
+        """Same-site allow-list check: a (needs_you, ...) tuple or None.
+
+        Shared by the initial apply click AND every later tab adoption. When
+        external autofill is on and the target looks fillable (known ATS
+        family, or an unknown host carrying a real application form), it
+        returns None so the wizard continues and fills the external form."""
+        if not self.EXTERNAL_APPLY_GUARD:
+            return None
+        host = self._url_host(page.url)
+        if not host:
+            return None
+        if self._host_allowed(host):
+            return None
+        return self._external_autofill_or_park(page, jid, host)
 
     def applied_signal(self, page: Page) -> bool:
         """Site override: the page itself proves this job is (now) applied."""
@@ -938,30 +1113,6 @@ class BaseSiteBot:
             pass
         return newp, True
 
-    def _external_guard_block(self, page: Page, jid):
-        """Same-site allow-list check: a (needs_you, ...) tuple or None.
-
-        Shared by the initial apply click AND every later tab adoption, so an
-        external career page is parked the moment it appears instead of being
-        clicked again into duplicate tabs (found live 2026-10-19)."""
-        if not self.EXTERNAL_APPLY_GUARD:
-            return None
-        m = re.match(r"https?://([^/]+)", page.url or "")
-        host = m.group(1) if m else ""
-        if not host:
-            return None
-        fam = self._host_family(host)
-        home_fam = self._host_family(self.home)
-        allowed = fam == home_fam or fam.endswith("." + home_fam)
-        for a in self.ALLOWED_APPLY_FAMILIES:
-            if fam == a or fam.endswith("." + a):
-                allowed = True
-                break
-        if not allowed:
-            return ("needs_you", f"external apply flow ({host})",
-                    self.safe_shot(page, f"external_{jid}"))
-        return None
-
     def _close_extra_tabs(self, root: Page) -> None:
         """Close tabs this job spawned so long sessions don't pile up copies
         of the same career page. Never touches the root page."""
@@ -1001,6 +1152,13 @@ class BaseSiteBot:
             if blocked:
                 return blocked
         if self._login_needed(page):
+            landed = self._url_host(page.url)
+            if landed and not self._host_allowed(landed):
+                # external ATS login walls: never demand a manual 10-minute
+                # login for a company portal the user may not even have
+                return ("needs_you",
+                        f"external apply flow ({landed}) — login required",
+                        self.safe_shot(page, f"login_{jid}"))
             if not self.await_manual_login(page):
                 return ("needs_you", "manual login required (timed out)",
                         self.safe_shot(page, f"login_{jid}"))
@@ -1014,6 +1172,24 @@ class BaseSiteBot:
                     self.safe_shot(page, f"external_{jid}"))
         if self.chatbot_present(page):
             return self.chatbot_flow(page, jid)
+        return self._form_loop(page, jid, tabs_before)
+
+    def _form_loop(self, page: Page, jid, tabs_before: list) -> tuple[str, str, str]:
+        """The fill -> next -> submit step loop shared by the site's own
+        wizard AND external-ATS chases (see _external_autofill_or_park).
+
+        When the loop runs on an EXTERNAL host, every failure keeps the
+        benign 'external apply flow' prefix so a storm of un-fillable SPA
+        apply portals can never trip the circuit breaker."""
+        started_host = self._url_host(page.url)
+        chasing = bool(started_host) and not self._host_allowed(started_host)
+        result = self._form_loop_inner(page, jid, tabs_before)
+        if chasing and result[0] in ("needs_you", "failed"):
+            fam = ats_family(started_host) or "generic"
+            result = self._wrap_external_note(started_host, fam, result)
+        return result
+
+    def _form_loop_inner(self, page: Page, jid, tabs_before: list) -> tuple[str, str, str]:
         max_steps = int((self.settings.get("limits", {}) or {}).get("max_wizard_steps", 30))
         budget = int((self.settings.get("limits", {}) or {}).get("per_job_budget_sec", 0) or 0)
         deadline = (time.time() + budget) if budget else 0.0
@@ -1097,13 +1273,50 @@ class BaseSiteBot:
                     page.wait_for_timeout(5000)
                     continue
                 if not leftover and not self._form_present(target):
-                    return ("needs_you", "form closed without confirmation — verify manually",
+                    # small-ATS job pages host the form behind an entry button
+                    # ("APPLY FOR THIS JOB" — lever, live 2026-10-23); click
+                    # it via the apply-entry sweep and keep looping.
+                    opened = False
+                    try:
+                        opened = bool(self.click_matching(target, self.APPLY_PATTERNS))
+                        if not opened:
+                            for fr in page.frames:
+                                if fr is target:
+                                    continue
+                                if self.click_matching(fr, self.APPLY_PATTERNS):
+                                    opened = True
+                                    break
+                    except Exception:
+                        pass
+                    if opened:
+                        page.wait_for_timeout(random.randint(1500, 3500))
+                        quiet = 0
+                        continue
+                    return ("needs_you",
+                            "form closed without confirmation — verify manually",
                             self.safe_shot(page, f"verify_{jid}"))
+                dis = self._disabled_submit_probe(page)
+                if dis:
+                    why = ("needs your input: submit button is disabled"
+                           + (" — reCAPTCHA/human check or required "
+                              "acknowledgment pending" if dis.get("captcha") else "")
+                           + " — click Submit in the browser to finish")
+                    return ("needs_you", why,
+                            self.safe_shot(page, f"nobtn_{jid}"))
                 return ("needs_you", "no next/submit button found",
                         self.safe_shot(page, f"nobtn_{jid}"))
             quiet = 0
+            # a fast redirect (SmartApply -> back to the board) can erase the
+            # confirmation phrase within seconds; sample the form text the
+            # instant after the click and keep scanning it below
+            sample = ""
+            try:
+                sample = (target.inner_text("body") or "")[:4000]
+            except Exception:
+                pass
             page.wait_for_timeout(random.randint(1500, 3500))
-            ph = (self._confirmation_phrase(page)
+            ph = (self._phrase_in(sample)
+                  or self._confirmation_phrase(page)
                   or self._confirmation_phrase_safe(target))
             if ph or self.applied_signal(page):
                 return ("applied", f"confirmed: {ph or 'applied state'}",
@@ -1113,7 +1326,8 @@ class BaseSiteBot:
                 for _ in range(3):
                     page.wait_for_timeout(3000)
                     t2 = self._resolve_form(page)
-                    ph = (self._confirmation_phrase(page)
+                    ph = (self._phrase_in(sample)
+                          or self._confirmation_phrase(page)
                           or self._confirmation_phrase_safe(t2))
                     if ph or self.applied_signal(page):
                         break
