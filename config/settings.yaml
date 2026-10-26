@@ -11,8 +11,10 @@ run:
   end_hour: 19
   headless: false      # keep false: headless windows can't be watched, don't
                        # exist in the taskbar, and can't be repaired manually
-  browser_window: minimized  # Chrome launches minimized to the taskbar (no
-                             # screen takeover, never jumps monitors).
+  browser_window: minimized  # Chrome is born OFF-SCREEN and immediately
+                             # minimized — the taskbar icon is the only
+                             # signal you'll see (no screen takeover, no
+                             # launch flash, never jumps monitors).
                              # It NEVER pops to the foreground — action-needed
                              # steps (login, Cloudflare) arrive as a desktop
                              # toast/Telegram ping; click the taskbar icon

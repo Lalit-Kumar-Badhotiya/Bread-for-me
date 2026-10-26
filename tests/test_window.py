@@ -93,10 +93,31 @@ class PopupKillerScriptTests(unittest.TestCase):
     def test_covers_all_popup_sources(self):
         from bot.window import POPUP_KILLER_JS as js
         self.assertIn("window.open = function", js)      # window.open override
-        self.assertIn("a[target=\"_blank\"]", js)        # anchor target strip
+        self.assertIn("'a[target], form[target], base[target]'", js)  # sweep
+        self.assertIn("closest('a[href]')", js)          # click-time strip
+        self.assertIn("'_self'", js)                     # forced same-tab
         self.assertIn("tagName === 'FORM'", js)          # form target strip
         self.assertIn("location.href = u.href", js)      # same-tab navigation
+        self.assertIn("window.focus = function", js)     # can't be summoned
+        self.assertIn("window.moveTo = function", js)    # can't be dragged out
         self.assertIn("}, true)", js)                    # capture-phase
+
+
+class LaunchPositionTests(unittest.TestCase):
+    """The browser is born OFF-SCREEN (its first paint never appears), and
+    the minimize call points the restore bounds back on-screen so taskbar
+    clicks still surface a normal window."""
+
+    def test_offscreen_birth_args(self):
+        from bot.window import OFFSCREEN_ARGS
+        self.assertTrue(
+            any(a.startswith("--window-position=") for a in OFFSCREEN_ARGS))
+
+    def test_restore_position_is_supported(self):
+        import inspect
+        import bot.window as wmod
+        self.assertIn("restore_at",
+                      inspect.signature(wmod.set_window_state).parameters)
 
 
 if __name__ == "__main__":

@@ -114,10 +114,11 @@ pinging you to click the taskbar icon yourself, whenever you get to it
 click). Pop-up windows are never even created: an in-page init script
 rewrites `target="_blank"` links and `window.open()` calls into
 same-tab navigation (so there is no second OS window to flash on
-screen), and a context-level guard sends anything exotic straight back
-to the taskbar the moment it appears. The only visible artifact left
-is the ~1s flash when the browser process itself launches (run start
-and chunk recycles) — headed Chromium cannot avoid that first paint.
+screen), a context-level guard sends anything exotic straight back to
+the taskbar the moment it appears, site scripts can no longer summon
+the window (`window.focus`/`moveTo` are neutered), and the browser is
+born off-screen (`--window-position`) so even the launch/recycle flash
+is gone — the taskbar icon is the only thing that ever appears.
 Set `browser_window: normal` + `pop_on_action: true` only if you want
 the old pop-up-for-hands behavior, and keep `headless: false` either
 way — headless windows can't be watched or repaired.

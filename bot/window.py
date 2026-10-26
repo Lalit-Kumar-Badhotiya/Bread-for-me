@@ -4,9 +4,10 @@ the bot works, and pop it back up only when something needs the user's hands
 
 Why not --start-minimized? Chrome ignores that flag reliably when it is
 spawned by another process, so the state is set through CDP right after
-launch (~1s flash on screen first — unavoidable; Playwright cannot spawn a
-process pre-minimized). Headless is NOT an alternative: a headless window
-never exists in the taskbar and the user can never watch or repair it.
+launch — and the window is BORN OFF-SCREEN (--window-position, see
+OFFSCREEN_ARGS) so its first paint never appears on any monitor.
+Headless is NOT an alternative: a headless window never exists in the
+taskbar and the user can never watch or repair it.
 
 A minimized/occluded window gets renderer throttling, which stalls
 scroll-driven listing pages — STEADY_ARGS below disables that so pages run
@@ -20,6 +21,13 @@ STEADY_ARGS = [
     "--disable-renderer-backgrounding",
     "--disable-backgrounding-occluded-windows",
 ]
+
+# A Chromium window paints at default bounds BEFORE any CDP command can
+# minimize it — that was the ~1s flash at every launch/chunk-recycle.
+# Launching at an off-screen position hides that first paint entirely;
+# the immediate minimize call re-positions the restore bounds on-screen,
+# so clicking the taskbar icon still surfaces a normal window.
+OFFSCREEN_ARGS = ("--window-position=-32000,-32000",)
 
 _MODES = {
     "minimized": "minimized", "minimal": "minimized", "taskbar": "minimized",
@@ -43,11 +51,15 @@ def minimize_requested(settings: dict, headless: bool) -> bool:
     return normalize_mode(run.get("browser_window")) == "minimized"
 
 
-def set_window_state(page: Page, state: str) -> bool:
+def set_window_state(page: Page, state: str,
+                     restore_at: tuple | None = None) -> bool:
     """Minimize ("minimized") or restore ("normal") the browser window that
     hosts `page` — the persistent context runs in a single window, so this
-    covers every tab the bot opens. Best-effort: returns False instead of
-    raising, so a closed window or a CDP hiccup never breaks a run."""
+    covers every tab the bot opens. restore_at=(left, top) moves the
+    window's position in the same call — used after an off-screen
+    launch to point the restore bounds at a visible spot, so a taskbar
+    click surfaces a normal window. Best-effort: returns False instead
+    of raising, so a closed window or a CDP hiccup never breaks a run."""
     try:
         ctx = page.context
         cdp = getattr(ctx, "_quiet_window_cdp", None)
@@ -58,8 +70,11 @@ def set_window_state(page: Page, state: str) -> bool:
             except Exception:
                 pass
         window_id = cdp.send("Browser.getWindowForTarget").get("windowId")
-        cdp.send("Browser.setWindowBounds",
-                 {"windowId": window_id, "bounds": {"windowState": state}})
+        bounds = {"windowState": state}
+        if restore_at is not None:
+            bounds["left"], bounds["top"] = restore_at
+        cdp.send("Browser.setWindowBounds", {"windowId": window_id,
+                                             "bounds": bounds})
         return True
     except Exception:
         return False
@@ -85,7 +100,10 @@ def attach_window_guard(ctx) -> None:
 # before any CDP minimize can land. This init script removes the root
 # cause — same-tab navigation instead of popup OS windows — so the window
 # is never created at all. click/submit listeners run in the capture
-# phase (before the site's own default action).
+# phase (before the site's own default action). It also covers
+# base[target=_blank] (which plain anchor checks miss), strips already
+# loaded _blank targets, and neuters window.focus()/moveTo() so site
+# scripts cannot summon a minimized window back onto the screen.
 POPUP_KILLER_JS = """
 (() => {
   try { window.open = function (url) {
@@ -97,11 +115,33 @@ POPUP_KILLER_JS = """
       } catch (e) {}
       return null;
   }; } catch (e) {}
+  try { window.focus = function () {}; } catch (e) {}
+  try { window.moveTo = function (x, y) {}; } catch (e) {}
+  try {
+    document.querySelectorAll('a[target], form[target], base[target]')
+      .forEach(el => {
+        if ((el.getAttribute('target') || '').toLowerCase() === '_blank')
+          el.removeAttribute('target');
+      });
+  } catch (e) {}
   document.addEventListener('click', function (e) {
     try {
       const t = e.target;
-      const a = t && t.closest ? t.closest('a[target="_blank"]') : null;
-      if (a) a.removeAttribute('target');
+      const a = t && t.closest ? t.closest('a[href]') : null;
+      if (!a) return;
+      let baseBlank = false;
+      try {
+        const bs = document.querySelectorAll('base[target]');
+        for (const b of bs) {
+          if ((b.getAttribute('target') || '').toLowerCase() === '_blank') {
+            baseBlank = true;
+            break;
+          }
+        }
+      } catch (err) {}
+      const own = (a.getAttribute('target') || '').toLowerCase();
+      if (own === '_blank' || (!own && baseBlank))
+        a.setAttribute('target', '_self');
     } catch (e) {}
   }, true);
   document.addEventListener('submit', function (e) {

@@ -117,32 +117,40 @@ def open_session(site: str, headless: bool, minimize: bool | None = None):
 
     Quiet runs (run.browser_window: minimized, the default) send the window
     straight to the taskbar and NEVER bring it up: action-needed steps are
-    toast/Telegram signals only. Every window the context opens later
+    toast/Telegram signals only. The window is born off-screen so even its
+    first paint never appears; every window the context opens later
     (target=_blank popups, e.g. glassdoor Easy Apply -> smartapply) is
-    minimized at creation via the window guard below.
+    minimized at creation via the window guard below, and the popup killer
+    init script rewrites same-tab navigation so popups are never created.
     """
     from playwright.sync_api import sync_playwright
-    from bot.window import attach_window_guard
+    from bot.window import (OFFSCREEN_ARGS, attach_window_guard)
     state = ROOT / "data" / "state" / site
     state.mkdir(parents=True, exist_ok=True)
     if _kill_stale_profile_browsers(state):
         print(f"[{site}] cleared a stale browser process still holding this profile")
     settings = load_yaml(CFG_DIR / "settings.yaml")
     channel = ((settings.get("sites") or {}).get(site) or {}).get("browser_channel")
+    if minimize is None:
+        minimize = minimize_requested(settings, headless)
     pw = sync_playwright().start()
     extra = {"channel": channel} if channel else {}
+    # Off-screen birth: a fresh window paints at default bounds BEFORE any
+    # CDP minimize can land (the launch flash); --window-position hides
+    # that first paint. Only for quiet runs — "normal" mode must be visible.
+    spawn_args = ["--disable-blink-features=AutomationControlled", *STEADY_ARGS]
+    if minimize:
+        spawn_args.extend(OFFSCREEN_ARGS)
     ctx = pw.chromium.launch_persistent_context(
-        str(state), headless=headless,
-        args=["--disable-blink-features=AutomationControlled", *STEADY_ARGS], **extra)
+        str(state), headless=headless, args=spawn_args, **extra)
     ctx.add_init_script(
         "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
     ctx.add_init_script(POPUP_KILLER_JS)   # popups never become OS windows
     ctx.set_default_timeout(20000)
     page = ctx.pages[0] if ctx.pages else ctx.new_page()
-    if minimize is None:
-        minimize = minimize_requested(settings, headless)
-    if minimize:  # straight to the taskbar (~1s flash first, unavoidable)
-        set_window_state(page, "minimized")
+    if minimize:  # into the taskbar, born off-screen so no flash; restore
+        # bounds are pointed back on-screen so taskbar clicks surface it
+        set_window_state(page, "minimized", restore_at=(100, 80))
         attach_window_guard(ctx)   # new windows (popups) never surface either
     return pw, ctx, page
 
