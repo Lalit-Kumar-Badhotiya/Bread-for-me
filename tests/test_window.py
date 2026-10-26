@@ -86,5 +86,18 @@ class WindowGuardTests(unittest.TestCase):
         attach_window_guard(_Ctx())     # must not raise
 
 
+class PopupKillerScriptTests(unittest.TestCase):
+    """The init script must stop popup OS windows at the SOURCE (same-tab
+    navigation) — no window is ever created, so nothing can flash."""
+
+    def test_covers_all_popup_sources(self):
+        from bot.window import POPUP_KILLER_JS as js
+        self.assertIn("window.open = function", js)      # window.open override
+        self.assertIn("a[target=\"_blank\"]", js)        # anchor target strip
+        self.assertIn("tagName === 'FORM'", js)          # form target strip
+        self.assertIn("location.href = u.href", js)      # same-tab navigation
+        self.assertIn("}, true)", js)                    # capture-phase
+
+
 if __name__ == "__main__":
     unittest.main()

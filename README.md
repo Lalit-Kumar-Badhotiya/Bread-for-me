@@ -111,9 +111,16 @@ It **never** restores itself: login / Cloudflare "verify you are human" /
 any hands-needed step arrives as a desktop toast (and optional Telegram)
 pinging you to click the taskbar icon yourself, whenever you get to it
 (page still runs fully active while minimized, so the run waits for your
-click). Set `browser_window: normal` + `pop_on_action: true` only if you
-want the old pop-up-for-hands behavior, and keep `headless: false`
-either way — headless windows can't be watched or repaired.
+click). Pop-up windows are never even created: an in-page init script
+rewrites `target="_blank"` links and `window.open()` calls into
+same-tab navigation (so there is no second OS window to flash on
+screen), and a context-level guard sends anything exotic straight back
+to the taskbar the moment it appears. The only visible artifact left
+is the ~1s flash when the browser process itself launches (run start
+and chunk recycles) — headed Chromium cannot avoid that first paint.
+Set `browser_window: normal` + `pop_on_action: true` only if you want
+the old pop-up-for-hands behavior, and keep `headless: false` either
+way — headless windows can't be watched or repaired.
 
 First 3–5 days: run `fetch` + `calibrate` only (no `apply`) and correct the
 queue — your rejects become new `exclude_keywords`. Then start `apply`.

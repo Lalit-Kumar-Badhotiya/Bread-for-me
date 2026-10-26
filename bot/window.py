@@ -79,3 +79,37 @@ def attach_window_guard(ctx) -> None:
         ctx.on("page", lambda p: set_window_state(p, "minimized"))
     except Exception:
         pass
+
+
+# Even the guard leaves a sub-second flash: Chromium SHOWS a new window
+# before any CDP minimize can land. This init script removes the root
+# cause — same-tab navigation instead of popup OS windows — so the window
+# is never created at all. click/submit listeners run in the capture
+# phase (before the site's own default action).
+POPUP_KILLER_JS = """
+(() => {
+  try { window.open = function (url) {
+      try {
+        if (typeof url !== 'string') return null;
+        const u = new URL(url, location.href);
+        if (u.protocol === 'http:' || u.protocol === 'https:')
+          location.href = u.href;
+      } catch (e) {}
+      return null;
+  }; } catch (e) {}
+  document.addEventListener('click', function (e) {
+    try {
+      const t = e.target;
+      const a = t && t.closest ? t.closest('a[target="_blank"]') : null;
+      if (a) a.removeAttribute('target');
+    } catch (e) {}
+  }, true);
+  document.addEventListener('submit', function (e) {
+    try {
+      const f = e.target;
+      if (f && f.tagName === 'FORM' && f.target === '_blank')
+        f.removeAttribute('target');
+    } catch (e) {}
+  }, true);
+})();
+"""

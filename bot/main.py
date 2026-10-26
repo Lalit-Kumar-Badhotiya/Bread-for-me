@@ -41,7 +41,8 @@ import yaml
 from bot.answers import AnswerLibrary
 from bot.notify import Notifier
 from bot.tracker import Tracker
-from bot.window import STEADY_ARGS, minimize_requested, set_window_state
+from bot.window import (POPUP_KILLER_JS, STEADY_ARGS, minimize_requested,
+                        set_window_state)
 
 CFG_DIR = ROOT / "config"
 RESUME_PATH = ROOT / "resume" / "resume.pdf"
@@ -135,6 +136,7 @@ def open_session(site: str, headless: bool, minimize: bool | None = None):
         args=["--disable-blink-features=AutomationControlled", *STEADY_ARGS], **extra)
     ctx.add_init_script(
         "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
+    ctx.add_init_script(POPUP_KILLER_JS)   # popups never become OS windows
     ctx.set_default_timeout(20000)
     page = ctx.pages[0] if ctx.pages else ctx.new_page()
     if minimize is None:
