@@ -786,25 +786,32 @@ class BaseSiteBot:
 
     # ---- quiet-run window control --------------------------------------
     # settings.run.browser_window: minimized (default) — the browser borrows
-    # the taskbar instead of the screen; the two manual steps below pop the
-    # window back up and re-minimize it afterwards.
+    # the taskbar instead of the screen. AS OF 2026-10-26 the bot never
+    # restores the window by itself: login / Cloudflare / any "hands needed"
+    # step arrives as a toast (+optional Telegram) and the user clicks the
+    # taskbar icon whenever convenient. run.pop_on_action: true restores
+    # the old pop-up-for-hands behavior.
     def _quiet_window(self, page: Page, state: str) -> None:
-        """Best-effort minimize/restore; no-op unless the run is in the
-        minimized window mode (and it just reports failure for a closed
-        window instead of raising)."""
+        """Window state changes for quiet runs. Minimize actions always
+        apply; "normal" (a pop-up) only fires when run.pop_on_action is
+        explicitly set — never by default."""
         try:
             if normalize_mode(
                     (self.settings.get("run") or {}).get("browser_window")
-            ) == "minimized":
-                set_window_state(page, state)
+            ) != "minimized":
+                return
+            if state == "normal" and not (
+                    (self.settings.get("run") or {}).get("pop_on_action", False)):
+                return          # the toast is the signal, not the screen
+            set_window_state(page, state)
         except Exception:
             pass
 
     def await_manual_login(self, page: Page) -> bool:
         minutes = int((self.settings.get("limits", {}) or {}).get("login_manual_wait_min", 10))
-        self._quiet_window(page, "normal")  # quiet mode: pop up so the user can log in
-        self.notify.send(f"ACTION NEEDED — log in to {self.name} in the OPENED browser "
-                         f"window (waiting up to {minutes} min)", toast=True)
+        self.notify.send(f"ACTION NEEDED — log in to {self.name}: click the "
+                         f"MINIMIZED browser icon in the taskbar and log in "
+                         f"(waiting up to {minutes} min)", toast=True)
         try:
             deadline = time.time() + minutes * 60
             while time.time() < deadline:
@@ -841,11 +848,10 @@ class BaseSiteBot:
         for this step). True as soon as the interstitial is gone."""
         minutes = int((self.settings.get("limits", {}) or {})
                       .get("captcha_manual_wait_min", 5))
-        self._quiet_window(page, "normal")  # quiet mode: the click is manual
         self.notify.send(f"ACTION NEEDED — Cloudflare check on {self.name} "
-                         f"job {job['id']}: click 'Verify you are human' in "
-                         f"the browser window (waiting up to {minutes} min)",
-                         toast=True)
+                         f"job {job['id']}: click the MINIMIZED browser icon "
+                         f"in the taskbar, solve 'Verify you are human' "
+                         f"(waiting up to {minutes} min)", toast=True)
         try:
             deadline = time.time() + minutes * 60
             while time.time() < deadline:

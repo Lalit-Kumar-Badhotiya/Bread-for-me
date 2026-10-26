@@ -12,10 +12,15 @@ run:
   headless: false      # keep false: headless windows can't be watched, don't
                        # exist in the taskbar, and can't be repaired manually
   browser_window: minimized  # Chrome launches minimized to the taskbar (no
-                             # screen takeover, never jumps monitors); it pops
-                             # up ONLY for login/Cloudflare steps and
-                             # re-minimizes itself after. "normal" = the old
-                             # always-visible behavior.
+                             # screen takeover, never jumps monitors).
+                             # It NEVER pops to the foreground — action-needed
+                             # steps (login, Cloudflare) arrive as a desktop
+                             # toast/Telegram ping; click the taskbar icon
+                             # yourself when convenient and minimize again.
+                             # Set browser_window: "normal" + pop_on_action:
+                             # true ONLY if you want the old pop-up behavior.
+  pop_on_action: false       # never restore the window for login/captcha
+                             # steps (true = the old pop-up-for-hands flow)
   interactive_learning: true  # wizard stuck on an unknown screening question? ask
                               # in the terminal, save it to answers.yaml, retry once
                               # (disable per-run with --no-learn for unattended runs)

@@ -181,5 +181,37 @@ class PatternTests(unittest.TestCase):
         self.assertIsNone(BaseSiteBot.DECLARATION_RX)
 
 
+class QuietWindowTests(unittest.TestCase):
+    """The bot must never pop the window for hands-needed steps by default.
+    run.pop_on_action: true is the explicit escape hatch."""
+
+    def setUp(self):
+        import bot.sites.base as base_mod
+        self.base_mod = base_mod
+        self._orig = base_mod.set_window_state
+        self.calls = []
+        base_mod.set_window_state = lambda page, state: self.calls.append(state)
+
+    def tearDown(self):
+        self.base_mod.set_window_state = self._orig
+
+    def test_never_pops_by_default(self):
+        bot = _Bot({})                      # browser_window defaults to minimized
+        bot._quiet_window(None, "normal")   # would pop up — must do NOTHING
+        self.assertEqual(self.calls, [])
+        bot._quiet_window(None, "minimized")
+        self.assertEqual(self.calls, ["minimized"])
+
+    def test_pop_on_action_true_restores_old_behavior(self):
+        bot = _Bot({"run": {"pop_on_action": True}})
+        bot._quiet_window(None, "normal")
+        self.assertEqual(self.calls, ["normal"])
+
+    def test_noop_when_window_mode_is_normal(self):
+        bot = _Bot({"run": {"browser_window": "normal"}})
+        bot._quiet_window(None, "minimized")
+        self.assertEqual(self.calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()

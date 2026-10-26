@@ -107,12 +107,13 @@ and `needs_you`/`failed` pages are saved as HTML next to their screenshots
 
 Quiet runs: `run.browser_window: minimized` (the default) launches the
 browser straight into the taskbar — no window popping over your monitors.
-It restores itself only where a human is strictly required (login /
-Cloudflare "verify you are human") and goes back to the taskbar afterwards;
-throttle-off flags keep pages fully active while minimized (there is a
-~1s window flash at launch, since Playwright cannot spawn pre-minimized).
-Set `browser_window: normal` for the old always-visible behavior, and keep
-`headless: false` either way — headless windows can't be watched or repaired.
+It **never** restores itself: login / Cloudflare "verify you are human" /
+any hands-needed step arrives as a desktop toast (and optional Telegram)
+pinging you to click the taskbar icon yourself, whenever you get to it
+(page still runs fully active while minimized, so the run waits for your
+click). Set `browser_window: normal` + `pop_on_action: true` only if you
+want the old pop-up-for-hands behavior, and keep `headless: false`
+either way — headless windows can't be watched or repaired.
 
 First 3–5 days: run `fetch` + `calibrate` only (no `apply`) and correct the
 queue — your rejects become new `exclude_keywords`. Then start `apply`.
