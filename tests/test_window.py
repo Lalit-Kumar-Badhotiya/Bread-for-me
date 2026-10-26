@@ -49,5 +49,42 @@ class SteadyArgsTests(unittest.TestCase):
             self.assertIn(flag, joined)
 
 
+class WindowGuardTests(unittest.TestCase):
+    """Every window the context opens later (target=_blank popups) is sent
+    straight to the taskbar — a popup must never surface on screen even
+    while the root window sits minimized."""
+
+    def test_guard_minimizes_new_pages(self):
+        import bot.window as wmod
+        from bot.window import attach_window_guard
+        orig = wmod.set_window_state
+        calls = []
+        wmod.set_window_state = lambda page, state: calls.append(state)
+        try:
+            class _Ctx:
+                def __init__(self):
+                    self.handlers = {}
+
+                def on(self, ev, fn):
+                    self.handlers[ev] = fn
+
+            ctx = _Ctx()
+            attach_window_guard(ctx)
+            self.assertIn("page", ctx.handlers)
+            ctx.handlers["page"](object())          # a popup appears
+            self.assertEqual(calls, ["minimized"])  # -> taskbar immediately
+        finally:
+            wmod.set_window_state = orig
+
+    def test_guard_survives_a_broken_context(self):
+        from bot.window import attach_window_guard
+
+        class _Ctx:
+            def on(self, ev, fn):
+                raise RuntimeError("no events here")
+
+        attach_window_guard(_Ctx())     # must not raise
+
+
 if __name__ == "__main__":
     unittest.main()

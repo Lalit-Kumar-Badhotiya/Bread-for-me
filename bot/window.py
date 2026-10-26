@@ -63,3 +63,19 @@ def set_window_state(page: Page, state: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def attach_window_guard(ctx) -> None:
+    """Every page/window this context opens LATER is forced straight back
+    into the taskbar at creation.
+
+    target=_blank links and window.open() spawn separate OS windows —
+    glassdoor/simplyhired "Easy Apply" -> smartapply is one — and a new
+    window comes up in the FOREGROUND even while the root window sits
+    minimized. This guard sends every such window to the taskbar the
+    moment Playwright reports it, so nothing ever stays on screen.
+    Best-effort: any failure is swallowed."""
+    try:
+        ctx.on("page", lambda p: set_window_state(p, "minimized"))
+    except Exception:
+        pass

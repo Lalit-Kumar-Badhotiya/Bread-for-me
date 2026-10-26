@@ -115,10 +115,13 @@ def open_session(site: str, headless: bool, minimize: bool | None = None):
     bundled browser as a bot however human the user's actions are.
 
     Quiet runs (run.browser_window: minimized, the default) send the window
-    straight to the taskbar; it pops back up only inside the bot's manual
-    steps (login / captcha) and re-minimizes itself after them.
+    straight to the taskbar and NEVER bring it up: action-needed steps are
+    toast/Telegram signals only. Every window the context opens later
+    (target=_blank popups, e.g. glassdoor Easy Apply -> smartapply) is
+    minimized at creation via the window guard below.
     """
     from playwright.sync_api import sync_playwright
+    from bot.window import attach_window_guard
     state = ROOT / "data" / "state" / site
     state.mkdir(parents=True, exist_ok=True)
     if _kill_stale_profile_browsers(state):
@@ -138,6 +141,7 @@ def open_session(site: str, headless: bool, minimize: bool | None = None):
         minimize = minimize_requested(settings, headless)
     if minimize:  # straight to the taskbar (~1s flash first, unavoidable)
         set_window_state(page, "minimized")
+        attach_window_guard(ctx)   # new windows (popups) never surface either
     return pw, ctx, page
 
 

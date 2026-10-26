@@ -61,7 +61,7 @@ limits:
 sites:
   # naukri joined verify_on_detail on 2026-10-19: card badges can be stale and
   # the JD header chip ("3 - 8 years") is the authoritative requirement.
-  naukri:      { enabled: true,  daily_cap: 25, max_titles_per_run: 30, pages_per_title: 3, verify_on_detail: true }
+  naukri:      { enabled: true,  daily_cap: 25, max_titles_per_run: 30, pages_per_title: 3, verify_on_detail: true }  # cap restored 2026-10-26 (the approved +25 was consumed earlier that day)
   # REMOVED 2026-10-19: wellfound skews international (US/EU remote startups);
   # 178 fetches yielded 0 applications, and the only jobs that reached the
   # form were location-ineligible for an India profile (wellfound blocks the

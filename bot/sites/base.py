@@ -1150,10 +1150,15 @@ class BaseSiteBot:
                         self.safe_shot(page, f"clickfail_{jid}"))
             page.wait_for_timeout(random.randint(1500, 3000))
             # "Apply"/"Apply Now ↗" often opens the real form in a NEW TAB
-            # (glassdoor/simplyhired -> smartapply.indeed.com). Follow it.
+            # (glassdoor/simplyhired -> smartapply.indeed.com). Follow it —
+            # and send it straight back to the taskbar: a freshly adopted
+            # popup window would otherwise sit in the foreground for the
+            # whole wizard (the context guard also covers this; this is
+            # the belt to its suspenders).
             page, followed = self._adopt_new_tab(page, tabs_before)
             if followed:
                 tabs_before = self._tab_list(page)
+                self._quiet_window(page, "minimized")
             blocked = self._external_guard_block(page, jid)
             if blocked:
                 return blocked
@@ -1213,6 +1218,7 @@ class BaseSiteBot:
             if followed:
                 page = late_page
                 tabs_before = self._tab_list(page)
+                self._quiet_window(page, "minimized")   # popup -> taskbar
                 blocked = self._external_guard_block(page, jid)
                 if blocked:
                     return blocked
