@@ -13,7 +13,10 @@ A minimized/occluded window gets renderer throttling, which stalls
 scroll-driven listing pages — STEADY_ARGS below disables that so pages run
 exactly as they would in the foreground while sitting in the taskbar.
 """
+import json
 import threading
+from datetime import datetime
+from pathlib import Path
 
 from playwright.sync_api import Page
 
@@ -68,29 +71,29 @@ def set_window_state(page: Page, state: str,
     hosts `page` — the persistent context runs in a single window, so this
     covers every tab the bot opens.
 
-    NOTE: restore_at is accepted for compatibility but NOT sent — a
-    position-only setWindowBounds call on a MINIMIZED window un-minimizes
-    it (verified live 2026-10-31: the window came back 'normal' at its old
-    clamped placement), and Chromium cannot change a minimized window's
-    restore placement through this call at all. A taskbar click therefore
-    resurfaces the window at its (off-screen) birth placement — which is
-    exactly what the restore watchdog (start_restore_shepherd) then pulls
-    on-screen. Best-effort: returns False instead of raising, so a closed
-    window or a CDP hiccup never breaks a run."""
+    IMPORTANT: this call binds its CDP session to the PAGE IT IS GIVEN —
+    never to a shared cache. Browser.getWindowForTarget() without a target
+    id answers with the SESSION's target's window: with the old root-page
+    cache, the window guard "minimized" the root window on every popup and
+    left real popup windows visible on screen ("pops up once in a while",
+    2026-10-31). restore_at is accepted for compatibility but NOT sent — a
+    position-only setWindowBounds call on a minimized window un-minimizes
+    it (verified live 2026-10-31), so a taskbar click resurfaces the window
+    at the off-screen birth placement and the restore watchdog
+    (start_restore_shepherd) pulls it on-screen. Best-effort: returns False
+    instead of raising, so a closed window or CDP hiccup never breaks a
+    run."""
     try:
-        ctx = page.context
-        cdp = getattr(ctx, "_quiet_window_cdp", None)
-        if cdp is None:
-            cdp = ctx.new_cdp_session(page)
-            try:  # one CDP session per browser session is enough
-                ctx._quiet_window_cdp = cdp
-            except Exception:
-                pass
+        cdp = page.context.new_cdp_session(page)
         window_id = cdp.send("Browser.getWindowForTarget").get("windowId")
         cdp.send("Browser.setWindowBounds",
                  {"windowId": window_id, "bounds": {"windowState": state}})
         return True
     except Exception:
+        try:
+            _note_popup(page, "minimize FAILED — window may stay visible")
+        except Exception:
+            pass
         return False
 
 
@@ -233,6 +236,24 @@ def _shepherd_loop(stop) -> None:
             break
 
 
+def _note_popup(page: Page, note: str) -> None:
+    """Append an event line (console + data/logs/popup_windows.jsonl) when a
+    context creates a window we send to the taskbar, or when a minimize
+    fails — evidence for any future 'it popped up' report."""
+    try:
+        rec = {"ts": datetime.now().isoformat(timespec="seconds"),
+               "note": note, "url": (getattr(page, "url", "") or "")[:200]}
+        line = json.dumps(rec, ensure_ascii=False)
+        path = (Path(__file__).resolve().parents[1] / "data" / "logs"
+                / "popup_windows.jsonl")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+        print(f"[popup] {line}")
+    except Exception:
+        pass
+
+
 def attach_window_guard(ctx) -> None:
     """Every page/window this context opens LATER is forced straight back
     into the taskbar at creation.
@@ -242,9 +263,16 @@ def attach_window_guard(ctx) -> None:
     window comes up in the FOREGROUND even while the root window sits
     minimized. This guard sends every such window to the taskbar the
     moment Playwright reports it, so nothing ever stays on screen.
-    Best-effort: any failure is swallowed."""
+    Best-effort: any failure is swallowed. Every triggering page is noted
+    (console + popup_windows.jsonl) so guard escapes are visible."""
+    def _quieten(page: Page) -> None:
+        try:
+            _note_popup(page, "new tab/window sent to taskbar by guard")
+        except Exception:
+            pass
+        set_window_state(page, "minimized")
     try:
-        ctx.on("page", lambda p: set_window_state(p, "minimized"))
+        ctx.on("page", _quieten)
     except Exception:
         pass
 
@@ -259,17 +287,50 @@ def attach_window_guard(ctx) -> None:
 # scripts cannot summon a minimized window back onto the screen.
 POPUP_KILLER_JS = """
 (() => {
-  try { window.open = function (url) {
+  // Immutable overrides: plain assignment can be defeated by site scripts
+  // (delete window.open restores the native popup opener) — defining them
+  // non-writable/non-configurable makes the rewrite permanent.
+  try {
+    Object.defineProperty(window, 'open', {
+      value: function (url) {
+        try {
+          if (typeof url !== 'string') return null;
+          const u = new URL(url, location.href);
+          if (u.protocol === 'http:' || u.protocol === 'https:')
+            location.href = u.href;
+        } catch (e) {}
+        return null;
+      },
+      writable: false, configurable: false });
+  } catch (e) {
+    try { window.open = function (url) { return null; }; } catch (e2) {}
+  }
+  try {
+    Object.defineProperty(window, 'focus', {
+      value: function () {}, writable: false, configurable: false });
+  } catch (e) { try { window.focus = function () {}; } catch (e2) {} }
+  try {
+    Object.defineProperty(window, 'moveTo', {
+      value: function () {}, writable: false, configurable: false });
+  } catch (e) { try { window.moveTo = function () {}; } catch (e2) {} }
+  // Programmatic-submit bypass: form.target='_blank'; form.submit() does
+  // NOT fire the 'submit' event, so the submit listener below never saw
+  // it and a real OS window popped. The prototype itself now strips popup
+  // targets before the real submit runs.
+  try {
+    const realSubmit = HTMLFormElement.prototype.submit;
+    if (realSubmit) HTMLFormElement.prototype.submit = function () {
       try {
-        if (typeof url !== 'string') return null;
-        const u = new URL(url, location.href);
-        if (u.protocol === 'http:' || u.protocol === 'https:')
-          location.href = u.href;
+        const t = ((this.getAttribute('target') || this.target || '') + '')
+          .toLowerCase();
+        if (t === '_blank') {
+          this.setAttribute('target', '_self');
+          try { this.target = '_self'; } catch (e2) {}
+        }
       } catch (e) {}
-      return null;
-  }; } catch (e) {}
-  try { window.focus = function () {}; } catch (e) {}
-  try { window.moveTo = function (x, y) {}; } catch (e) {}
+      return realSubmit.apply(this, arguments);
+    };
+  } catch (e) {}
   try {
     document.querySelectorAll('a[target], form[target], base[target]')
       .forEach(el => {

@@ -210,6 +210,56 @@ class OffscreenRestoreTests(unittest.TestCase):
                          [m for m, _ in sent if m == "Browser.setWindowBounds"])
 
 
+class RunGuardTests(unittest.TestCase):
+    """set_window_state binds its CDP session to the page it is given: the
+    window guard must minimize the POPUP'S own window. The old shared
+    root-page session made Browser.getWindowForTarget answer with the ROOT
+    window id, so the guard minimized the root window on every popup and
+    real popup windows stayed visible on screen."""
+
+    def test_sessions_are_page_bound(self):
+        import types
+        from bot.window import set_window_state
+
+        class _Cdp:
+            def __init__(self):
+                self.sent = []
+
+            def send(self, msg, arg=None):
+                self.sent.append((msg, dict(arg or {})))
+                if msg == "Browser.getWindowForTarget":
+                    return {"windowId": 9}
+                return {}
+
+        sessions = []
+
+        class _Ctx:
+            def new_cdp_session(self, p):
+                c = _Cdp()
+                sessions.append(c)
+                return c
+
+        ctx = _Ctx()
+        p1 = types.SimpleNamespace(context=ctx)
+        p2 = types.SimpleNamespace(context=ctx)
+        self.assertTrue(set_window_state(p1, "minimized"))
+        self.assertTrue(set_window_state(p2, "minimized"))
+        self.assertEqual(len(sessions), 2)          # one session PER page
+        for sess in sessions:
+            st = [a for m, a in sess.sent if m == "Browser.setWindowBounds"]
+            self.assertEqual(len(st), 1)
+            self.assertEqual(st[0]["bounds"], {"windowState": "minimized"})
+
+    def test_form_submit_bypass_is_patched(self):
+        from bot.window import POPUP_KILLER_JS
+        self.assertIn("HTMLFormElement.prototype.submit", POPUP_KILLER_JS)
+        self.assertIn("this.setAttribute('target', '_self')", POPUP_KILLER_JS)
+
+    def test_window_open_override_cannot_be_deleted_by_sites(self):
+        from bot.window import POPUP_KILLER_JS
+        self.assertIn("Object.defineProperty(window, 'open'", POPUP_KILLER_JS)
+
+
 class RestoreShepherdTests(unittest.TestCase):
     """The per-session watchdog pulls a window the USER restored off-screen
     back to RESTORE_AT within ~1s; minimized/on-screen windows are untouched
