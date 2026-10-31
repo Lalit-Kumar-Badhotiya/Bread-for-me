@@ -13,6 +13,8 @@ A minimized/occluded window gets renderer throttling, which stalls
 scroll-driven listing pages — STEADY_ARGS below disables that so pages run
 exactly as they would in the foreground while sitting in the taskbar.
 """
+import threading
+
 from playwright.sync_api import Page
 
 # Keep pages fully active even when their window is minimized/occluded.
@@ -21,6 +23,15 @@ STEADY_ARGS = [
     "--disable-renderer-backgrounding",
     "--disable-backgrounding-occluded-windows",
 ]
+
+# Where user-completed taskbar clicks are placed (the on-screen spot the
+# rescued window is pulled to), and the same spot set_window_state uses as
+# its restore placement.
+RESTORE_AT = (100, 80)
+
+# Anything left at -32000 or beyond is off any sane monitor — real
+# multi-monitor setups stay well above this (and minimized windows park
+# exactly at -32000).
 
 # A Chromium window paints at default bounds BEFORE any CDP command can
 # minimize it — that was the ~1s flash at every launch/chunk-recycle.
@@ -55,11 +66,17 @@ def set_window_state(page: Page, state: str,
                      restore_at: tuple | None = None) -> bool:
     """Minimize ("minimized") or restore ("normal") the browser window that
     hosts `page` — the persistent context runs in a single window, so this
-    covers every tab the bot opens. restore_at=(left, top) moves the
-    window's position in the same call — used after an off-screen
-    launch to point the restore bounds at a visible spot, so a taskbar
-    click surfaces a normal window. Best-effort: returns False instead
-    of raising, so a closed window or a CDP hiccup never breaks a run."""
+    covers every tab the bot opens.
+
+    NOTE: restore_at is accepted for compatibility but NOT sent — a
+    position-only setWindowBounds call on a MINIMIZED window un-minimizes
+    it (verified live 2026-10-31: the window came back 'normal' at its old
+    clamped placement), and Chromium cannot change a minimized window's
+    restore placement through this call at all. A taskbar click therefore
+    resurfaces the window at its (off-screen) birth placement — which is
+    exactly what the restore watchdog (start_restore_shepherd) then pulls
+    on-screen. Best-effort: returns False instead of raising, so a closed
+    window or a CDP hiccup never breaks a run."""
     try:
         ctx = page.context
         cdp = getattr(ctx, "_quiet_window_cdp", None)
@@ -72,16 +89,6 @@ def set_window_state(page: Page, state: str,
         window_id = cdp.send("Browser.getWindowForTarget").get("windowId")
         cdp.send("Browser.setWindowBounds",
                  {"windowId": window_id, "bounds": {"windowState": state}})
-        if restore_at is not None:
-            # SECOND, position-only call: a single combined call left the
-            # restore placement stuck at the off-screen birth position, so a
-            # taskbar click surfaced an invisible window (2026-10-31, user
-            # stranded mid-captcha). Position-while-minimized points the
-            # placement the window restores to; fix_offscreen_restore below
-            # still covers the case where Chromium ignores this call.
-            cdp.send("Browser.setWindowBounds",
-                     {"windowId": window_id,
-                      "bounds": {"left": restore_at[0], "top": restore_at[1]}})
         return True
     except Exception:
         return False
@@ -116,11 +123,114 @@ def fix_offscreen_restore(page: Page) -> bool:
                 or bounds.get("top", 0) <= -20000):
             cdp.send("Browser.setWindowBounds",
                      {"windowId": window_id,
-                      "bounds": {"left": 100, "top": 80}})
+                      "bounds": {"left": RESTORE_AT[0], "top": RESTORE_AT[1]}})
             return True                      # user's click now shows the window
         return False
     except Exception:
         return False
+
+
+# ------------------------------------------------------- restore watchdog
+# fix_offscreen_restore above only runs from the dedicated hands-needed wait
+# loops — anywhere else (fetch, sweeps, between jobs, mid-wizard pauses) a
+# user's taskbar click resurfaced the window at the off-screen placement and
+# nothing brought it in. This watchdog is a tiny thread born with EVERY
+# quiet browser session: once a second it scans top-level windows and pulls
+# any RESTORED Chrome-class window parked at an impossible position back to
+# RESTORE_AT. It uses plain user32 calls (no playwright objects, so it is
+# safe to run alongside the main thread) and it NEVER surfaces a window on
+# its own — a minimized window is left alone; only a window the user whose
+# own click brought back gets rescued.
+
+def _is_offscreen(left: int, top: int) -> bool:
+    """Same threshold everywhere: Chromium clamps the off-screen birth
+    position (read back as -26214, 2026-10-31), and a parked/restored window
+    sits far beyond any real multi-monitor coordinate."""
+    return left <= -20000 or top <= -20000
+
+
+def _rescue_needed(iconic: bool, left: int, top: int) -> bool:
+    """Rescue rule: the user restored the window but Windows surfaced it at
+    the off-screen birth placement. A still-minimized (iconic) window or an
+    on-screen position is never touched."""
+    return (not iconic) and _is_offscreen(left, top)
+
+
+def start_restore_shepherd(page: Page):
+    """Spawn the watchdog thread for this browser session. Returns the stop
+    Event; the thread also self-terminates ~3 min after its session's parked
+    windows disappear (browser closed / process killed)."""
+    stop = threading.Event()
+    threading.Thread(target=_shepherd_loop, args=(stop,),
+                     name="restore-shepherd", daemon=True).start()
+    try:
+        page.context._shepherd_stop = stop
+    except Exception:
+        pass
+    return stop
+
+
+def stop_restore_shepherd(ctx) -> None:
+    """Signal the session's watchdog thread to stop (called from
+    _safe_close). Absent/inert when the context has no watchdog."""
+    try:
+        ev = getattr(ctx, "_shepherd_stop", None)
+        if ev is not None:
+            ev.set()
+        ctx._shepherd_stop = None
+    except Exception:
+        pass
+
+
+def _shepherd_loop(stop) -> None:
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    misses = 0
+    while not stop.is_set():
+        stop.wait(1.0)
+        any_parked = False
+        wins = []
+
+        proto = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND,
+                                   wintypes.LPARAM)
+
+        def on_hwnd(hwnd, _lparam):
+            nonlocal any_parked
+            try:
+                cls = ctypes.create_unicode_buffer(64)
+                if user32.GetClassNameW(hwnd, cls, 64) == 0:
+                    return True
+                if cls.value != "Chrome_WidgetWin_1":  # only browser windows
+                    return True
+                r = wintypes.RECT()
+                if not user32.GetWindowRect(hwnd, ctypes.byref(r)):
+                    return True
+                left, top = int(r.left), int(r.top)
+                if _is_offscreen(left, top):
+                    any_parked = True       # a session window is still alive
+                pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                if pid.value == 0:
+                    return True
+                if _rescue_needed(bool(user32.IsIconic(hwnd)), left, top):
+                    wins.append((int(hwnd), int(r.right) - left,
+                                 int(r.bottom) - top))
+            except Exception:
+                pass
+            return True
+
+        cb = proto(on_hwnd)
+        try:
+            user32.EnumWindows(cb, 0)
+        finally:
+            cb = None                       # release the callback ref
+        for hwnd, w, h in wins:
+            user32.MoveWindow(wintypes.HWND(hwnd), RESTORE_AT[0],
+                              RESTORE_AT[1], w, h, True)
+        misses = misses + 1 if not any_parked else 0
+        if misses >= 180:   # no parked session window for ~3 min -> gone
+            break
 
 
 def attach_window_guard(ctx) -> None:

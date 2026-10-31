@@ -104,20 +104,38 @@ class PopupKillerScriptTests(unittest.TestCase):
 
 
 class LaunchPositionTests(unittest.TestCase):
-    """The browser is born OFF-SCREEN (its first paint never appears), and
-    the minimize call points the restore bounds back on-screen so taskbar
-    clicks still surface a normal window."""
+    """The browser is born OFF-SCREEN (its first paint never appears) and is
+    minimized through a single CDP call. A restore placement cannot be set
+    on a minimized window (position-only calls un-minimize it — verified
+    live 2026-10-31), so taskbar-click visibility belongs to the restore
+    watchdog, not to the minimize call."""
 
     def test_offscreen_birth_args(self):
         from bot.window import OFFSCREEN_ARGS
         self.assertTrue(
             any(a.startswith("--window-position=") for a in OFFSCREEN_ARGS))
 
-    def test_restore_position_is_supported(self):
-        import inspect
-        import bot.window as wmod
-        self.assertIn("restore_at",
-                      inspect.signature(wmod.set_window_state).parameters)
+    def test_minimize_sends_exactly_one_state_only_call(self):
+        import types
+        from bot.window import set_window_state
+        sent = []
+
+        class _Cdp:
+            def send(self, msg, arg=None):
+                sent.append((msg, dict(arg or {})))
+                if msg == "Browser.getWindowForTarget":
+                    return {"windowId": 3}
+                return {}
+
+        ctx = types.SimpleNamespace(new_cdp_session=lambda p: _Cdp())
+        page = types.SimpleNamespace(context=ctx)
+        self.assertTrue(set_window_state(page, "minimized",
+                                         restore_at=(100, 80)))
+        sets = [a for m, a in sent if m == "Browser.setWindowBounds"]
+        self.assertEqual(len(sets), 1)              # one call only…
+        # …carrying ONLY the state: a position would un-minimize the window
+        self.assertEqual(list(sets[0]["bounds"].keys()), ["windowState"])
+        self.assertEqual(sets[0]["bounds"]["windowState"], "minimized")
 
 
 class OffscreenRestoreTests(unittest.TestCase):
@@ -190,6 +208,36 @@ class OffscreenRestoreTests(unittest.TestCase):
         self.assertFalse(fix_offscreen_restore(page))
         self.assertNotIn("Browser.setWindowBounds",
                          [m for m, _ in sent if m == "Browser.setWindowBounds"])
+
+
+class RestoreShepherdTests(unittest.TestCase):
+    """The per-session watchdog pulls a window the USER restored off-screen
+    back to RESTORE_AT within ~1s; minimized/on-screen windows are untouched
+    and every failure path is silent."""
+
+    def test_rescue_rule(self):
+        from bot.window import _rescue_needed
+        self.assertTrue(_rescue_needed(False, -32000, -32000))
+        self.assertTrue(_rescue_needed(False, 500, -25000))
+        self.assertFalse(_rescue_needed(True, -32000, -32000))  # still minimized
+        self.assertFalse(_rescue_needed(False, 100, 80))        # on-screen
+        self.assertFalse(_rescue_needed(False, -1920, 0))       # real 2nd monitor
+
+    def test_start_and_stop_roundtrip(self):
+        import threading
+        import types
+        from bot.window import start_restore_shepherd, stop_restore_shepherd
+        ctx = types.SimpleNamespace()
+        page = types.SimpleNamespace(context=ctx)
+        stop = start_restore_shepherd(page)
+        try:
+            self.assertIsInstance(stop, threading.Event)
+            self.assertIs(ctx._shepherd_stop, stop)
+        finally:
+            stop_restore_shepherd(ctx)
+        self.assertTrue(stop.is_set())
+        self.assertIsNone(ctx._shepherd_stop)
+        stop_restore_shepherd(ctx)      # second call stays silent
 
 
 if __name__ == "__main__":

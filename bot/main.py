@@ -42,7 +42,8 @@ from bot.answers import AnswerLibrary
 from bot.notify import Notifier
 from bot.tracker import Tracker
 from bot.window import (POPUP_KILLER_JS, STEADY_ARGS, fix_offscreen_restore,
-                        minimize_requested, set_window_state)
+                        minimize_requested, set_window_state,
+                        start_restore_shepherd, stop_restore_shepherd)
 
 CFG_DIR = ROOT / "config"
 RESUME_PATH = ROOT / "resume" / "resume.pdf"
@@ -148,10 +149,13 @@ def open_session(site: str, headless: bool, minimize: bool | None = None):
     ctx.add_init_script(POPUP_KILLER_JS)   # popups never become OS windows
     ctx.set_default_timeout(20000)
     page = ctx.pages[0] if ctx.pages else ctx.new_page()
-    if minimize:  # into the taskbar, born off-screen so no flash; restore
-        # bounds are pointed back on-screen so taskbar clicks surface it
-        set_window_state(page, "minimized", restore_at=(100, 80))
+    if minimize:  # into the taskbar, born off-screen so no flash
+        set_window_state(page, "minimized")
         attach_window_guard(ctx)   # new windows (popups) never surface either
+        # Watchdog: the user's taskbar click must ALWAYS surface this window
+        # (any point of any run — fetch, between jobs, mid-form), not just at
+        # the dedicated wait loops where fix_offscreen_restore is called.
+        start_restore_shepherd(page)
     return pw, ctx, page
 
 
@@ -177,6 +181,7 @@ def cmd_init(args):
 def _safe_close(ctx, pw):
     """Shut the browser down without crashing the CLI (the user may have
     closed the window/context mid-run — closing twice raises TargetClosed)."""
+    stop_restore_shepherd(ctx)
     try:
         ctx.close()
     except Exception:
