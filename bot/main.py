@@ -361,17 +361,56 @@ def _write_export(rows, out_dir: Path, stamp: str):
 
 def cmd_login(args):
     settings = load_yaml(CFG_DIR / "settings.yaml")
-    _bot, tracker, notifier = get_bot(args.site)
+    bot, tracker, notifier = get_bot(args.site)
     headless = bool(settings.get("run", {}).get("headless", False))
-    pw, ctx, page = open_session(args.site, headless=False, minimize=False)
-    # login always headed AND visible — this window exists for the user
+    # Born off-screen + minimized: this window must never pop up on its own —
+    # the toast tells the user, who surfaces it from the taskbar themselves.
+    pw, ctx, page = open_session(args.site, headless=headless, minimize=True)
     (_, _, home) = REGISTRY[args.site]
     try:
         page.goto(home, wait_until="domcontentloaded")
     except Exception:
         pass
-    notifier.send(f"Browser open — log in to {args.site} manually now.", toast=True)
-    input("When you are logged in (you can see your name/profile), press ENTER here... ")
+    notifier.send(f"[{args.site}] Browser open — click its taskbar icon and "
+                  "log in. The bot detects the login and closes the window "
+                  "itself — no ENTER anywhere.", toast=True)
+    print(f"Browser open (taskbar) — log in to {args.site}.")
+    try:
+        interactive = bool(sys.stdin) and sys.stdin.isatty()
+    except Exception:
+        interactive = False
+    if interactive:
+        print("Terminal is interactive: press ENTER once you are logged in.")
+        try:
+            input()
+        except EOFError:
+            interactive = False
+    if not interactive:
+        # No interactive stdin (scheduled tasks, agent shells): watch the
+        # logged-in signal on whatever page the browser is showing. The bot
+        # never navigates during the wait, so the user's typing in the login
+        # form is never disturbed. Browsers stay active while minimized.
+        deadline = time.time() + 20 * 60
+        logged = False
+        while time.time() < deadline:
+            time.sleep(8)
+            try:
+                if page.is_closed() or not ctx.pages:
+                    break                     # user closed the window
+                sig = bot.logged_in_signal(page)
+            except Exception:
+                break                        # browser went away
+            if sig:                          # True: session is live
+                logged = True
+                break
+        if logged:
+            notifier.send(f"[{args.site}] login detected — session saved.",
+                          toast=True)
+            print("login detected.")
+        else:
+            notifier.send(f"[{args.site}] login wait timed out (20 min) — "
+                          "log in again when convenient", toast=True)
+            print("login wait timed out.")
     _safe_close(ctx, pw)
     print(f"Session saved to data/state/{args.site} — future runs reuse it.")
 

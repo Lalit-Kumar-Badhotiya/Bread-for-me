@@ -168,9 +168,19 @@ class IndeedGroupBot(BaseSiteBot):
         if self.applied_signal(page):
             return ("applied", "pre-check: site already shows applied state",
                     self.safe_shot(page, f"preapplied_{job['id']}"))
-        apply_loc = self.find_apply(
-            page, self.APPLY_LOCATORS,
-            role_rx=re.compile(r"^apply( now)?$", re.I))
+        # Heavy SPA pages (simplyhired's Chakra app, glassdoor) render the
+        # Apply button seconds AFTER domcontentloaded — a single fixed 2.5s
+        # wait parked hydrated-later jobs as "no apply button" (2026-10-31
+        # screenshots show the button present by park time). Search in
+        # rounds with a settle pause between them before giving up.
+        apply_loc = None
+        for _round in range(3):
+            apply_loc = self.find_apply(
+                page, self.APPLY_LOCATORS,
+                role_rx=re.compile(r"^(apply now|quick apply|apply)$", re.I))
+            if apply_loc:
+                break
+            page.wait_for_timeout(2500)
         if not apply_loc:
             return ("needs_you", "no apply button", self.safe_shot(page, f"noapply_{job['id']}"))
         result = self.wizard(page, job["id"], apply_loc)
