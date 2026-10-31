@@ -399,7 +399,12 @@ def cmd_login(args):
                     break                     # user closed the window
                 sig = bot.logged_in_signal(page)
             except Exception:
-                break                        # browser went away
+                # mid-login the page navigates (SSO redirect, re-render) and
+                # the JS context dies momentarily — a transient failure here
+                # must NEVER end the wait (it closed the window on a user
+                # mid-typing, 2026-10-31). Wait and retry instead.
+                time.sleep(7)
+                continue
             if sig:                          # True: session is live
                 logged = True
                 break
@@ -408,9 +413,10 @@ def cmd_login(args):
                           toast=True)
             print("login detected.")
         else:
-            notifier.send(f"[{args.site}] login wait timed out (20 min) — "
-                          "log in again when convenient", toast=True)
-            print("login wait timed out.")
+            notifier.send(f"[{args.site}] login not detected in the 60-min "
+                          "window — run the login again when convenient",
+                          toast=True)
+            print("login wait ended (not detected).")
     _safe_close(ctx, pw)
     print(f"Session saved to data/state/{args.site} — future runs reuse it.")
 
