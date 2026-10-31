@@ -390,7 +390,7 @@ def cmd_login(args):
         # logged-in signal on whatever page the browser is showing. The bot
         # never navigates during the wait, so the user's typing in the login
         # form is never disturbed. Browsers stay active while minimized.
-        deadline = time.time() + 20 * 60
+        deadline = time.time() + 60 * 60
         logged = False
         while time.time() < deadline:
             time.sleep(8)
