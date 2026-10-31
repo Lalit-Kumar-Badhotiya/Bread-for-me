@@ -120,5 +120,64 @@ class LaunchPositionTests(unittest.TestCase):
                       inspect.signature(wmod.set_window_state).parameters)
 
 
+class OffscreenRestoreTests(unittest.TestCase):
+    """fix_offscreen_restore completes the USER'S own taskbar click: a
+    window restored off-screen is pulled on-screen; minimized windows are
+    never touched, and CDP failures never raise."""
+
+    def _page(self, bounds):
+        import types
+        sent = []
+
+        class _Cdp:
+            def send(self, msg, arg=None):
+                sent.append((msg, arg))
+                if msg == "Browser.getWindowForTarget":
+                    return {"windowId": 7}
+                if msg == "Browser.getWindowBounds":
+                    return bounds
+                return {}
+
+        ctx = types.SimpleNamespace(new_cdp_session=lambda p: _Cdp())
+        page = types.SimpleNamespace(context=ctx)
+        return page, sent
+
+    def test_pulls_a_user_restored_window_onscreen(self):
+        from bot.window import fix_offscreen_restore
+        page, sent = self._page({"windowState": "normal",
+                                 "left": -32000, "top": -32000})
+        self.assertTrue(fix_offscreen_restore(page))
+        self.assertIn(("Browser.setWindowBounds",
+                       {"windowId": 7, "bounds": {"left": 100, "top": 80}}),
+                      sent)
+
+    def test_leaves_a_minimized_window_alone(self):
+        from bot.window import fix_offscreen_restore
+        page, sent = self._page({"windowState": "minimized",
+                                 "left": -32000, "top": -32000})
+        self.assertFalse(fix_offscreen_restore(page))
+        self.assertNotIn("Browser.setWindowBounds",
+                         [m for m, _ in sent if m == "Browser.setWindowBounds"])
+
+    def test_leaves_an_onscreen_window_alone(self):
+        from bot.window import fix_offscreen_restore
+        page, sent = self._page({"windowState": "normal",
+                                 "left": 100, "top": 80})
+        self.assertFalse(fix_offscreen_restore(page))
+        self.assertNotIn("Browser.setWindowBounds",
+                         [m for m, _ in sent if m == "Browser.setWindowBounds"])
+
+    def test_swallows_cdp_failures(self):
+        import types
+        from bot.window import fix_offscreen_restore
+
+        class _Boom:
+            def new_cdp_session(self, page):
+                raise RuntimeError("no cdp")
+
+        page = types.SimpleNamespace(context=_Boom())
+        self.assertFalse(fix_offscreen_restore(page))   # must not raise
+
+
 if __name__ == "__main__":
     unittest.main()

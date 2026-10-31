@@ -70,12 +70,49 @@ def set_window_state(page: Page, state: str,
             except Exception:
                 pass
         window_id = cdp.send("Browser.getWindowForTarget").get("windowId")
-        bounds = {"windowState": state}
+        cdp.send("Browser.setWindowBounds",
+                 {"windowId": window_id, "bounds": {"windowState": state}})
         if restore_at is not None:
-            bounds["left"], bounds["top"] = restore_at
-        cdp.send("Browser.setWindowBounds", {"windowId": window_id,
-                                             "bounds": bounds})
+            # SECOND, position-only call: a single combined call left the
+            # restore placement stuck at the off-screen birth position, so a
+            # taskbar click surfaced an invisible window (2026-10-31, user
+            # stranded mid-captcha). Position-while-minimized points the
+            # placement the window restores to; fix_offscreen_restore below
+            # still covers the case where Chromium ignores this call.
+            cdp.send("Browser.setWindowBounds",
+                     {"windowId": window_id,
+                      "bounds": {"left": restore_at[0], "top": restore_at[1]}})
         return True
+    except Exception:
+        return False
+
+
+def fix_offscreen_restore(page: Page) -> bool:
+    """Complete the USER'S own taskbar click: when they bring the window out
+    of minimized state and it would surface off-screen (birth position
+    -32000), pull it back on-screen. The bot never initiates a restore —
+    this only makes a restore the user performs VISIBLE. Poll from the
+    hands-needed wait loops (login / captcha). Best-effort: False on any
+    failure, so a closed window or CDP hiccup never breaks a run."""
+    try:
+        ctx = page.context
+        cdp = getattr(ctx, "_quiet_window_cdp", None)
+        if cdp is None:
+            cdp = ctx.new_cdp_session(page)
+            try:  # one CDP session per browser session is enough
+                ctx._quiet_window_cdp = cdp
+            except Exception:
+                pass
+        window_id = cdp.send("Browser.getWindowForTarget").get("windowId")
+        b = cdp.send("Browser.getWindowBounds", {"windowId": window_id})
+        if b.get("windowState") == "minimized":
+            return False                     # still parked; user hasn't clicked
+        if (b.get("left", 0) <= -20000 or b.get("top", 0) <= -20000):
+            cdp.send("Browser.setWindowBounds",
+                     {"windowId": window_id,
+                      "bounds": {"left": 100, "top": 80}})
+            return True                      # user's click now shows the window
+        return False
     except Exception:
         return False
 

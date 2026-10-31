@@ -41,8 +41,8 @@ import yaml
 from bot.answers import AnswerLibrary
 from bot.notify import Notifier
 from bot.tracker import Tracker
-from bot.window import (POPUP_KILLER_JS, STEADY_ARGS, minimize_requested,
-                        set_window_state)
+from bot.window import (POPUP_KILLER_JS, STEADY_ARGS, fix_offscreen_restore,
+                        minimize_requested, set_window_state)
 
 CFG_DIR = ROOT / "config"
 RESUME_PATH = ROOT / "resume" / "resume.pdf"
@@ -397,6 +397,7 @@ def cmd_login(args):
             try:
                 if page.is_closed() or not ctx.pages:
                     break                     # user closed the window
+                fix_offscreen_restore(page)   # completes the taskbar click
                 sig = bot.logged_in_signal(page)
             except Exception:
                 # mid-login the page navigates (SSO redirect, re-render) and

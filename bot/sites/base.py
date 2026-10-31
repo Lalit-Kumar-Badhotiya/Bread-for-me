@@ -28,7 +28,7 @@ from playwright.sync_api import Page
 from ..answers import AnswerLibrary
 from ..notify import Notifier
 from ..tracker import Tracker
-from ..window import normalize_mode, set_window_state
+from ..window import fix_offscreen_restore, normalize_mode, set_window_state
 from ..ats import ats_family, safe_from_probe, SAFE_FORM_JS
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -817,6 +817,7 @@ class BaseSiteBot:
             while time.time() < deadline:
                 page.wait_for_timeout(5000)
                 try:
+                    fix_offscreen_restore(page)   # user's taskbar click -> visible
                     if (re.search(LOGIN_URL_RX, page.url or "")
                             or page.locator("input[type=password]:visible").count() > 0):
                         continue
@@ -859,6 +860,7 @@ class BaseSiteBot:
                     page.wait_for_timeout(4000)
                     if page.is_closed():
                         return False
+                    fix_offscreen_restore(page)   # taskbar click -> visible
                     if not self._cf_challenge(page):
                         return True
                 except Exception:
@@ -1210,6 +1212,11 @@ class BaseSiteBot:
             if deadline and time.time() > deadline:
                 return ("needs_you", f"per-job time budget ({budget}s) exceeded",
                         self.safe_shot(page, f"budget_{jid}"))
+            if _step % 8 == 7:
+                # mid-run taskbar clicks surface a window whose restore
+                # placement can sit off-screen — pull it into view here too
+                # (call sites above cover the dedicated hands-waits)
+                fix_offscreen_restore(page)
             # a previous click (or a late popup) may have opened a new tab:
             # adopt it and re-check the external guard BEFORE clicking again,
             # so we never re-click a button that spawns duplicate career-page
