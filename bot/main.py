@@ -392,19 +392,22 @@ def cmd_login(args):
         # form is never disturbed. Browsers stay active while minimized.
         deadline = time.time() + 60 * 60
         logged = False
+        tick = 0
         while time.time() < deadline:
-            time.sleep(8)
+            time.sleep(2)
+            tick += 1
             try:
                 if page.is_closed() or not ctx.pages:
                     break                     # user closed the window
-                fix_offscreen_restore(page)   # completes the taskbar click
+                fix_offscreen_restore(page)   # completes the taskbar click (~2s)
+                if tick % 4 != 1:             # signal check stays at ~8s
+                    continue
                 sig = bot.logged_in_signal(page)
             except Exception:
                 # mid-login the page navigates (SSO redirect, re-render) and
                 # the JS context dies momentarily — a transient failure here
-                # must NEVER end the wait (it closed the window on a user
-                # mid-typing, 2026-10-31). Wait and retry instead.
-                time.sleep(7)
+                # must NEVER end the wait. Wait and retry instead.
+                time.sleep(2)
                 continue
             if sig:                          # True: session is live
                 logged = True

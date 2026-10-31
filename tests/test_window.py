@@ -144,8 +144,9 @@ class OffscreenRestoreTests(unittest.TestCase):
 
     def test_pulls_a_user_restored_window_onscreen(self):
         from bot.window import fix_offscreen_restore
-        page, sent = self._page({"windowState": "normal",
-                                 "left": -32000, "top": -32000})
+        page, sent = self._page(
+            {"bounds": {"windowState": "normal",
+                        "left": -32000, "top": -32000}})
         self.assertTrue(fix_offscreen_restore(page))
         self.assertIn(("Browser.setWindowBounds",
                        {"windowId": 7, "bounds": {"left": 100, "top": 80}}),
@@ -153,16 +154,18 @@ class OffscreenRestoreTests(unittest.TestCase):
 
     def test_leaves_a_minimized_window_alone(self):
         from bot.window import fix_offscreen_restore
-        page, sent = self._page({"windowState": "minimized",
-                                 "left": -32000, "top": -32000})
+        page, sent = self._page(
+            {"bounds": {"windowState": "minimized",
+                        "left": -32000, "top": -32000}})
         self.assertFalse(fix_offscreen_restore(page))
         self.assertNotIn("Browser.setWindowBounds",
                          [m for m, _ in sent if m == "Browser.setWindowBounds"])
 
     def test_leaves_an_onscreen_window_alone(self):
         from bot.window import fix_offscreen_restore
-        page, sent = self._page({"windowState": "normal",
-                                 "left": 100, "top": 80})
+        page, sent = self._page(
+            {"bounds": {"windowState": "normal",
+                        "left": 100, "top": 80}})
         self.assertFalse(fix_offscreen_restore(page))
         self.assertNotIn("Browser.setWindowBounds",
                          [m for m, _ in sent if m == "Browser.setWindowBounds"])
@@ -177,6 +180,16 @@ class OffscreenRestoreTests(unittest.TestCase):
 
         page = types.SimpleNamespace(context=_Boom())
         self.assertFalse(fix_offscreen_restore(page))   # must not raise
+
+    def test_tolerates_a_bounds_less_response(self):
+        # CDP hiccups can return a result with no "bounds": the shepherd
+        # must neither raise nor reposition (it used to read the flat dict
+        # and misjudge every window, 2026-10-31).
+        from bot.window import fix_offscreen_restore
+        page, sent = self._page({})
+        self.assertFalse(fix_offscreen_restore(page))
+        self.assertNotIn("Browser.setWindowBounds",
+                         [m for m, _ in sent if m == "Browser.setWindowBounds"])
 
 
 if __name__ == "__main__":

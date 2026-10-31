@@ -104,10 +104,16 @@ def fix_offscreen_restore(page: Page) -> bool:
             except Exception:
                 pass
         window_id = cdp.send("Browser.getWindowForTarget").get("windowId")
-        b = cdp.send("Browser.getWindowBounds", {"windowId": window_id})
-        if b.get("windowState") == "minimized":
+        # CDP nests the values: {"bounds": {left, top, windowState, ...}} —
+        # reading them flat (b.get("left", 0)) always saw the 0 default and
+        # the window never got pulled on-screen (2026-10-31, "still not
+        # opening" after the first shepherd attempt).
+        bounds = (cdp.send("Browser.getWindowBounds",
+                           {"windowId": window_id}).get("bounds") or {})
+        if bounds.get("windowState") == "minimized":
             return False                     # still parked; user hasn't clicked
-        if (b.get("left", 0) <= -20000 or b.get("top", 0) <= -20000):
+        if (bounds.get("left", 0) <= -20000
+                or bounds.get("top", 0) <= -20000):
             cdp.send("Browser.setWindowBounds",
                      {"windowId": window_id,
                       "bounds": {"left": 100, "top": 80}})
