@@ -152,11 +152,22 @@ def _is_offscreen(left: int, top: int) -> bool:
     return left <= -20000 or top <= -20000
 
 
-def _rescue_needed(iconic: bool, left: int, top: int) -> bool:
-    """Rescue rule: the user restored the window but Windows surfaced it at
-    the off-screen birth placement. A still-minimized (iconic) window or an
-    on-screen position is never touched."""
-    return (not iconic) and _is_offscreen(left, top)
+def _window_action(iconic: bool, offscreen: bool,
+                   parked_before: bool) -> str | None:
+    """Watchdog decision for one top-level browser window:
+    * "parked"  — minimized right now; remember it as user-clickable.
+    * "rescue"  — it was in the taskbar before and came back out off-screen:
+                  that is the USER's taskbar click; pull it to RESTORE_AT.
+    * "hide"    — off-screen but NEVER minimized (a popup that escaped the
+                  window guard): send it to the taskbar instead of honoring
+                  it (pulling guard escapes on-screen was a real popup
+                  source, 2026-10-31 live popup test).
+    * None      — nothing to do (on-screen normal window)."""
+    if iconic:                                   # minimize may re-fix soon
+        return "parked"
+    if not offscreen:
+        return None
+    return "rescue" if parked_before else "hide"
 
 
 def start_restore_shepherd(page: Page):
@@ -189,17 +200,17 @@ def _shepherd_loop(stop) -> None:
     import ctypes
     from ctypes import wintypes
     user32 = ctypes.windll.user32
+    parked = set()      # hwnds seen minimized (candidates for a user click)
     misses = 0
     while not stop.is_set():
         stop.wait(1.0)
+        recs = []       # (hwnd, iconic, offscreen, width, height)
         any_parked = False
-        wins = []
 
         proto = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND,
                                    wintypes.LPARAM)
 
         def on_hwnd(hwnd, _lparam):
-            nonlocal any_parked
             try:
                 cls = ctypes.create_unicode_buffer(64)
                 if user32.GetClassNameW(hwnd, cls, 64) == 0:
@@ -210,15 +221,12 @@ def _shepherd_loop(stop) -> None:
                 if not user32.GetWindowRect(hwnd, ctypes.byref(r)):
                     return True
                 left, top = int(r.left), int(r.top)
-                if _is_offscreen(left, top):
-                    any_parked = True       # a session window is still alive
-                pid = wintypes.DWORD()
-                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                if pid.value == 0:
-                    return True
-                if _rescue_needed(bool(user32.IsIconic(hwnd)), left, top):
-                    wins.append((int(hwnd), int(r.right) - left,
-                                 int(r.bottom) - top))
+                off = _is_offscreen(left, top)
+                iconized = bool(user32.IsIconic(hwnd))
+                if iconized:
+                    any_parked = True
+                recs.append((int(hwnd), iconized, off,
+                             int(r.right) - left, int(r.bottom) - top))
             except Exception:
                 pass
             return True
@@ -228,9 +236,22 @@ def _shepherd_loop(stop) -> None:
             user32.EnumWindows(cb, 0)
         finally:
             cb = None                       # release the callback ref
-        for hwnd, w, h in wins:
-            user32.MoveWindow(wintypes.HWND(hwnd), RESTORE_AT[0],
-                              RESTORE_AT[1], w, h, True)
+        live = {}
+        for hwnd, iconic, off, w, h in recs:
+            live[hwnd] = True
+            action = _window_action(iconic, off, hwnd in parked)
+            if action == "parked":
+                parked.add(hwnd)
+            elif action == "rescue":
+                parked.discard(hwnd)
+                user32.MoveWindow(wintypes.HWND(hwnd), RESTORE_AT[0],
+                                  RESTORE_AT[1], w, h, True)
+            elif action == "hide":
+                # WM_SYSCOMMAND/SC_MINIMIZE — the window escaped the guard
+                user32.PostMessageW(wintypes.HWND(hwnd),
+                                    wintypes.WM_SYSCOMMAND,
+                                    0xF020, 0)
+        parked &= set(live)                  # drop hwnds of closed windows
         misses = misses + 1 if not any_parked else 0
         if misses >= 180:   # no parked session window for ~3 min -> gone
             break

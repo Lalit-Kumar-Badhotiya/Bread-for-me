@@ -265,13 +265,18 @@ class RestoreShepherdTests(unittest.TestCase):
     back to RESTORE_AT within ~1s; minimized/on-screen windows are untouched
     and every failure path is silent."""
 
-    def test_rescue_rule(self):
-        from bot.window import _rescue_needed
-        self.assertTrue(_rescue_needed(False, -32000, -32000))
-        self.assertTrue(_rescue_needed(False, 500, -25000))
-        self.assertFalse(_rescue_needed(True, -32000, -32000))  # still minimized
-        self.assertFalse(_rescue_needed(False, 100, 80))        # on-screen
-        self.assertFalse(_rescue_needed(False, -1920, 0))       # real 2nd monitor
+    def test_watchdog_decision(self):
+        from bot.window import _window_action
+        # minimized windows are remembered (parked candidates), never moved
+        self.assertEqual(_window_action(True, True, False), "parked")
+        self.assertEqual(_window_action(True, False, False), "parked")
+        # the user's own taskbar click: was parked before, now out off-screen
+        self.assertEqual(_window_action(False, True, True), "rescue")
+        # a guard escape (off-screen, never minimized): hide, don't honor
+        self.assertEqual(_window_action(False, True, False), "hide")
+        # on-screen windows: nothing
+        self.assertIsNone(_window_action(False, False, True))
+        self.assertIsNone(_window_action(False, False, False))
 
     def test_start_and_stop_roundtrip(self):
         import threading
