@@ -278,6 +278,132 @@ class RestoreShepherdTests(unittest.TestCase):
         self.assertIsNone(_window_action(False, False, True))
         self.assertIsNone(_window_action(False, False, False))
 
+    def test_scan_once_reacts_and_reports_parked(self):
+        """_scan_once must park minimized SESSION windows, pull a PARKED
+        window's restore back on-screen, HIDE guard escapes, keep the
+        shepherd alive while a session window the USER is actively using
+        sits on-screen, and ignore foreign (user's own) browser windows —
+        the close-down counter relies on the return value. The previous
+        version had both kill-bugs: liveness from a callback-local closure
+        assignment (shepherd self-terminated after ~3 min, 'can't open the
+        chrome'), and liveness keyed on 'something is minimized' (same
+        self-kill while the user had the window open mid-use)."""
+        import ctypes
+        from ctypes import wintypes
+
+        from bot.window import _scan_once, RESTORE_AT
+
+        class _User32:
+            """Minimal user32: windows map hwnd -> [cls, x, y, w, h,
+            iconic, pid]; actions are recorded, never real."""
+
+            def __init__(self, windows):
+                self.windows = windows
+                self.moves = []
+                self.syscommands = []
+
+            def _key(self, hwnd):
+                return int(getattr(hwnd, "value", hwnd) or 0)
+
+            def EnumWindows(self, cb, lp):
+                for hwnd in list(self.windows):
+                    if not cb(wintypes.HWND(hwnd), 0):
+                        break
+
+            def GetClassNameW(self, hwnd, buf, n):
+                rec = self.windows.get(self._key(hwnd))
+                if rec is None:
+                    return 0
+                buf.value = rec[0]
+                return len(buf.value)
+
+            def GetWindowRect(self, hwnd, r):
+                rec = self.windows.get(self._key(hwnd))
+                if rec is None:
+                    return 0
+                # byref() hands us an opaque wrapper: reach the RECT inside
+                rect = getattr(r, "_obj", r)
+                x, y, w, h = rec[1], rec[2], rec[3], rec[4]
+                rect.left, rect.top = x, y
+                rect.right, rect.bottom = x + w, y + h
+                return 1
+
+            def IsIconic(self, hwnd):
+                rec = self.windows.get(self._key(hwnd))
+                return 1 if rec and rec[5] else 0
+
+            def GetWindowThreadProcessId(self, hwnd, pid):
+                rec = self.windows.get(self._key(hwnd))
+                # byref() wrapper: write through the DWORD inside it
+                getattr(pid, "_obj", pid).value = 0 if rec is None else rec[6]
+                return 1
+
+            def MoveWindow(self, hwnd, x, y, w, h, repaint):
+                h_int = self._key(hwnd)
+                self.moves.append((h_int, x, y, w, h))
+                rec = self.windows.get(h_int)   # emulate the real move, or
+                if rec is not None:
+                    rec[1], rec[2] = x, y       # the rescues never converge
+                    rec[5] = False
+                return 1
+
+            def PostMessageW(self, hwnd, msg, wp, lp):
+                h_int = self._key(hwnd)
+                self.syscommands.append((h_int, wp))
+                if wp == 0xF020:                # SC_MINIMIZE: mark minimal
+                    rec = self.windows.get(h_int)
+                    if rec is not None:
+                        rec[5] = True
+                return 1
+
+        OURS, FOREIGN = 1001, 7777
+
+        def win(cls="Chrome_WidgetWin_1", x=100, y=80, w=800, h=600,
+                iconic=False, pid=OURS):
+            return [cls, x, y, w, h, iconic, pid]
+
+        u = _User32({111: win(), 222: win(iconic=True),
+                     999: win(iconic=True, pid=FOREIGN)})  # user's own chrome
+        parked = set()
+        mine = frozenset({OURS})
+        self.assertTrue(_scan_once(u, parked, mine))
+        self.assertEqual(parked, {222})      # OUR minimized window remembered
+        self.assertNotIn(999, parked)        # foreign window: ignored
+        self.assertEqual(u.moves, [])        # on-screen window: untouched
+
+        # the user clicks the taskbar icon of the bot chrome: the window
+        # restores at its off-screen birth placement -> pulled to RESTORE_AT
+        u.windows[222] = win(x=-26214, y=-26214)
+        self.assertTrue(_scan_once(u, parked, mine))  # session still alive
+        self.assertEqual(u.moves,
+                         [(222, RESTORE_AT[0], RESTORE_AT[1], 800, 600)])
+        self.assertNotIn(222, parked)        # now on-screen
+
+        # a session window the user actively uses on-screen keeps the
+        # shepherd alive (old liveness keyed on "something is minimized"
+        # killed it mid-use, so a LATER click would have failed)
+        self.assertTrue(_scan_once(u, parked, mine))
+        self.assertFalse(parked)
+        self.assertEqual(len(u.moves), 1)
+
+        # a session window that escaped the guard off-screen (never
+        # minimized): sent to the taskbar, not honored
+        u.windows[333] = win(x=-26000, y=-25000)
+        self.assertTrue(_scan_once(u, parked, mine))
+        self.assertEqual(u.syscommands, [(333, 0xF020)])
+
+        # once every session window is gone the pass reports dead…
+        del u.windows[111], u.windows[222], u.windows[333]
+        parked.add(111)
+        self.assertFalse(_scan_once(u, parked, mine))
+        self.assertEqual(parked, set())              # …and parked is pruned
+
+        # …and foreign windows are never acted on even when off-screen
+        u.windows[888] = win(x=-26000, y=-25000, pid=FOREIGN)
+        u.syscommands.clear()
+        self.assertFalse(_scan_once(u, parked, mine))
+        self.assertEqual(u.syscommands, [])
+
     def test_start_and_stop_roundtrip(self):
         import threading
         import types

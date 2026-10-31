@@ -170,12 +170,58 @@ def _window_action(iconic: bool, offscreen: bool,
     return "rescue" if parked_before else "hide"
 
 
+def _snapshot_session_pids() -> frozenset:
+    """Pids of browser windows that are minimized OR off-screen right now —
+    at shepherd spawn that is exactly this session's freshly born window(s)
+    (birth-minimized, off-screen placement). The user's on-screen chrome is
+    excluded, and every watchdog decision is pid-gated on this set so the
+    watchdog never touches (and never dies because of) foreign browser
+    windows. Popups the sites open later share the browser main-process pid,
+    so they stay covered by the snapshot."""
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    pids = set()
+    proto = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def cb(hwnd, _lp):
+        try:
+            hbox = int(getattr(hwnd, "value", hwnd) or 0)
+            cls = ctypes.create_unicode_buffer(64)
+            if user32.GetClassNameW(hbox, cls, 64) == 0:
+                return True
+            if cls.value != "Chrome_WidgetWin_1":
+                return True
+            r = wintypes.RECT()
+            if not user32.GetWindowRect(hbox, ctypes.byref(r)):
+                return True
+            off = _is_offscreen(int(r.left), int(r.top))
+            iconic = bool(user32.IsIconic(hbox))
+            if not (off or iconic):
+                return True            # a user's own on-screen browser
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hbox, ctypes.byref(pid))
+            if pid.value:
+                pids.add(pid.value)
+        except Exception:
+            pass
+        return True
+
+    c = proto(cb)
+    try:
+        user32.EnumWindows(c, 0)
+    finally:
+        c = None
+    return frozenset(pids)
+
+
 def start_restore_shepherd(page: Page):
     """Spawn the watchdog thread for this browser session. Returns the stop
-    Event; the thread also self-terminates ~3 min after its session's parked
-    windows disappear (browser closed / process killed)."""
+    Event; the thread also self-terminates ~3 min after this session's
+    browser windows are all gone (browser closed / process killed)."""
     stop = threading.Event()
-    threading.Thread(target=_shepherd_loop, args=(stop,),
+    mine = _snapshot_session_pids()
+    threading.Thread(target=_shepherd_loop, args=(stop, mine),
                      name="restore-shepherd", daemon=True).start()
     try:
         page.context._shepherd_stop = stop
@@ -196,64 +242,95 @@ def stop_restore_shepherd(ctx) -> None:
         pass
 
 
-def _shepherd_loop(stop) -> None:
+def _scan_once(user32, parked: set, mine_pids: frozenset) -> bool:
+    """One watchdog pass over all top-level windows, acting ONLY on windows
+    whose pid belongs to this browser session (mine_pids, snapshotted at
+    spawn). Returns True while any of this session's windows exists — the
+    close-down counter in _shepherd_loop relies on that return value. The
+    previous version had BOTH of these bugs (2026-10-31 'can't open the
+    chrome'):
+    * liveness came from a closure assignment (`any_parked = True` inside
+      the EnumWindows callback) which Python made callback-local — it never
+      updated the outer variable, so the shepherd killed itself after ~3
+      minutes and the user's taskbar click stopped surfacing the window;
+    * liveness keyed on "something is minimized", so a window the USER was
+      actively using on-screen also counted as gone — same self-kill
+      mid-use. Both are gone: liveness is "a session pid still owns a
+      window"."""
     import ctypes
     from ctypes import wintypes
+    recs = []       # (hwnd, pid, iconic, offscreen, width, height)
+
+    proto = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND,
+                               wintypes.LPARAM)
+
+    def on_hwnd(hwnd, _lparam):
+        try:
+            # EnumWindows delivers the handle as a plain int through the
+            # real FFI trampoline; normalize whatever form arrives so the
+            # bookkeeping below can't crash on a ctypes instance.
+            hbox = int(getattr(hwnd, "value", hwnd) or 0)
+            cls = ctypes.create_unicode_buffer(64)
+            if user32.GetClassNameW(hbox, cls, 64) == 0:
+                return True
+            if cls.value != "Chrome_WidgetWin_1":  # only browser windows
+                return True
+            r = wintypes.RECT()
+            if not user32.GetWindowRect(hbox, ctypes.byref(r)):
+                return True
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hbox, ctypes.byref(pid))
+            left, top = int(r.left), int(r.top)
+            off = _is_offscreen(left, top)
+            iconized = bool(user32.IsIconic(hbox))
+            recs.append((hbox, pid.value, iconized, off,
+                         int(r.right) - left, int(r.bottom) - top))
+        except Exception:
+            pass
+        return True
+
+    cb = proto(on_hwnd)
+    try:
+        user32.EnumWindows(cb, 0)
+    finally:
+        cb = None                       # release the callback ref
+
+    alive = False
+    live = set()
+    for hbox, pid, iconic, off, w, h in recs:
+        if pid not in mine_pids:
+            continue                    # the user's own browser: never touch
+        alive = True
+        live.add(hbox)
+        action = _window_action(iconic, off, hbox in parked)
+        if action == "parked":
+            parked.add(hbox)
+        elif action == "rescue":
+            parked.discard(hbox)
+            user32.MoveWindow(wintypes.HWND(hbox), RESTORE_AT[0],
+                              RESTORE_AT[1], w, h, True)
+        elif action == "hide":
+            # WM_SYSCOMMAND(0x112) / SC_MINIMIZE(0xF020) — the window
+            # escaped the guard: send it to the taskbar. wintypes has no
+            # WM_SYSCOMMAND name in Python 3.14 (would AttributeError and
+            # kill the thread, caught by the fake-user32 test).
+            user32.PostMessageW(wintypes.HWND(hbox), 0x0112, 0xF020, 0)
+    parked &= live                      # drop hwnds of closed windows
+    return alive
+
+
+def _shepherd_loop(stop, mine_pids: frozenset) -> None:
+    import ctypes
     user32 = ctypes.windll.user32
     parked = set()      # hwnds seen minimized (candidates for a user click)
     misses = 0
     while not stop.is_set():
         stop.wait(1.0)
-        recs = []       # (hwnd, iconic, offscreen, width, height)
-        any_parked = False
-
-        proto = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND,
-                                   wintypes.LPARAM)
-
-        def on_hwnd(hwnd, _lparam):
-            try:
-                cls = ctypes.create_unicode_buffer(64)
-                if user32.GetClassNameW(hwnd, cls, 64) == 0:
-                    return True
-                if cls.value != "Chrome_WidgetWin_1":  # only browser windows
-                    return True
-                r = wintypes.RECT()
-                if not user32.GetWindowRect(hwnd, ctypes.byref(r)):
-                    return True
-                left, top = int(r.left), int(r.top)
-                off = _is_offscreen(left, top)
-                iconized = bool(user32.IsIconic(hwnd))
-                if iconized:
-                    any_parked = True
-                recs.append((int(hwnd), iconized, off,
-                             int(r.right) - left, int(r.bottom) - top))
-            except Exception:
-                pass
-            return True
-
-        cb = proto(on_hwnd)
-        try:
-            user32.EnumWindows(cb, 0)
-        finally:
-            cb = None                       # release the callback ref
-        live = {}
-        for hwnd, iconic, off, w, h in recs:
-            live[hwnd] = True
-            action = _window_action(iconic, off, hwnd in parked)
-            if action == "parked":
-                parked.add(hwnd)
-            elif action == "rescue":
-                parked.discard(hwnd)
-                user32.MoveWindow(wintypes.HWND(hwnd), RESTORE_AT[0],
-                                  RESTORE_AT[1], w, h, True)
-            elif action == "hide":
-                # WM_SYSCOMMAND/SC_MINIMIZE — the window escaped the guard
-                user32.PostMessageW(wintypes.HWND(hwnd),
-                                    wintypes.WM_SYSCOMMAND,
-                                    0xF020, 0)
-        parked &= set(live)                  # drop hwnds of closed windows
-        misses = misses + 1 if not any_parked else 0
-        if misses >= 180:   # no parked session window for ~3 min -> gone
+        if _scan_once(user32, parked, mine_pids):
+            misses = 0                  # a session window still exists
+            continue
+        misses += 1
+        if misses >= 180:   # no session window for ~3 min -> session gone
             break
 
 
