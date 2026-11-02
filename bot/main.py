@@ -232,6 +232,28 @@ def _apply_chunked(bot, settings, site, pw, ctx, page, max_apps):
         except Exception:
             sig = None
         if sig is False:
+            # the fresh chunk browser is already OPEN — a rotated identity
+            # (indeed rotates the session each time SmartApply's identity
+            # gate is passed mid-run; session lifetimes of minutes observed
+            # live 2026-11-02) is fixed by ONE login right there. Wait
+            # bounded (toast + taskbar) instead of ending the run and
+            # forcing a full relaunch for the same result.
+            rescued = False
+            try:
+                rescued = bot.await_manual_login(page)
+            except Exception:          # window already gone: no rescue
+                rescued = False
+            if rescued:
+                try:
+                    sig = bot.preflight(page)
+                except Exception:
+                    sig = None
+                if sig is not False:
+                    bot.tracker.log_event(
+                        "run", f"[{site}] chunk-boundary login rescued in "
+                               f"the recycled browser (after {total} "
+                               f"processed job(s))")
+        if sig is False:
             bot.notify.send(f"[{site}] session expired at a chunk boundary — "
                             f"run: run_apply.py login {site}", toast=True)
             break
