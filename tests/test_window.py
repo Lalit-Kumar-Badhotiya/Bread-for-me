@@ -58,8 +58,11 @@ class WindowGuardTests(unittest.TestCase):
         import bot.window as wmod
         from bot.window import attach_window_guard
         orig = wmod.set_window_state
+        orig_note = wmod._note_popup
         calls = []
         wmod.set_window_state = lambda page, state: calls.append(state)
+        # stub popups must never write into the LIVE popup_windows.jsonl
+        wmod._note_popup = lambda page, note: None
         try:
             class _Ctx:
                 def __init__(self):
@@ -75,6 +78,7 @@ class WindowGuardTests(unittest.TestCase):
             self.assertEqual(calls, ["minimized"])  # -> taskbar immediately
         finally:
             wmod.set_window_state = orig
+            wmod._note_popup = orig_note
 
     def test_guard_survives_a_broken_context(self):
         from bot.window import attach_window_guard

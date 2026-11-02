@@ -13,19 +13,36 @@ from bot.sites.base import BaseSiteBot
 # ------------------------------------------------------------------ stubs
 class _Page:
     """Bare page: url + a canned evaluate() result (SAFE_FORM_JS probe)."""
-    def __init__(self, url="", evaluate_result=None):
+    def __init__(self, url="", evaluate_result=None, frames=None, body_text=""):
         self.url = url
         self._eval = evaluate_result
+        self.frames = frames or []          # frame-like objects (gate probes)
+        self._body = body_text              # inner_text("body") canned text
 
     def evaluate(self, js):
         return self._eval
+
+    def inner_text(self, selector):
+        return self._body
+
+
+class _WaitPage:
+    """Page for await_manual_fix polls: instant timeouts, closed flag."""
+    def __init__(self, closed=False):
+        self._closed = closed
+
+    def wait_for_timeout(self, ms):
+        return None
+
+    def is_closed(self):
+        return self._closed
 
 
 class _Notify:
     def __init__(self):
         self.sent = []
 
-    def send(self, msg):
+    def send(self, msg, toast=False):
         self.sent.append(str(msg))
 
 
@@ -211,6 +228,99 @@ class QuietWindowTests(unittest.TestCase):
         bot = _Bot({"run": {"browser_window": "normal"}})
         bot._quiet_window(None, "minimized")
         self.assertEqual(self.calls, [])
+
+
+class SmartApplyGateTests(unittest.TestCase):
+    """Mid-flow identity gate detection (2026-11-02 glassdoor/indeed parks,
+    evidence: 'Sign In | Indeed Accounts' stuck shots + popup-guard telemetry
+    on profile.indeed.com from=gnav-indapply-SmartApply)."""
+    def setUp(self):
+        self.bot = _Bot()
+
+    def test_secure_url_hit(self):
+        self.assertTrue(self.bot._smartapply_signin_gate(
+            _Page("https://secure.indeed.com/auth?hl=en&continue=%2Fviewjob")))
+
+    def test_profile_popup_url_hit(self):
+        self.assertTrue(self.bot._smartapply_signin_gate(
+            _Page("https://profile.indeed.com/?hl=en_IN"
+                  "&from=gnav-indapply-SmartApply")))
+
+    def test_frame_url_hit(self):
+        fr = _Page("https://secure.indeed.com/signin")
+        self.assertTrue(self.bot._smartapply_signin_gate(
+            _Page("https://www.glassdoor.co.in/job/x", frames=[fr])))
+
+    def test_signin_text_hit(self):
+        self.assertTrue(self.bot._smartapply_signin_gate(_Page(
+            "https://www.glassdoor.co.in/job/x",
+            body_text="Ready to take the next step?\nEmail address\nContinue")))
+
+    def test_form_page_negative(self):
+        self.assertFalse(self.bot._smartapply_signin_gate(_Page(
+            "https://www.glassdoor.co.in/job/x",
+            body_text="Apply with your resume. Full name, mobile number, "
+                      "years of experience 0, email")))
+
+    def test_email_field_alone_negative(self):
+        # one marker alone must never fire — SmartApply forms carry emails
+        self.assertFalse(self.bot._smartapply_signin_gate(_Page(
+            "https://in.indeed.com/viewjob?jk=1",
+            body_text="Email address *\nFull name *\nContinue\nSubmit")))
+
+
+class AwaitManualFixTests(unittest.TestCase):
+    """Bounded hands-wait inside a form flow (gate / disabled submit)."""
+    def setUp(self):
+        # keep the real CDP window calls + popup telemetry out of stub tests
+        import bot.sites.base as base_mod
+        self._base_mod = base_mod
+        self._orig_sws = base_mod.set_window_state
+        base_mod.set_window_state = lambda page, state: None
+
+    def tearDown(self):
+        self._base_mod.set_window_state = self._orig_sws
+
+    def _bot(self, minutes=None):
+        limits = {} if minutes is None else {"captcha_manual_wait_min": minutes}
+        return _Bot({"limits": limits})
+
+    def test_done_on_first_poll(self):
+        bot = self._bot(5)
+        hits = []
+        self.assertTrue(bot.await_manual_fix(
+            _WaitPage(), 9, "test fix", lambda p: hits.append(1) or True))
+        self.assertEqual(len(hits), 1)
+        self.assertTrue(bot.notify.sent[0].startswith("ACTION NEEDED"))
+
+    def test_zero_minutes_never_polls(self):
+        bot = self._bot(0)
+        hits = []
+        self.assertFalse(bot.await_manual_fix(
+            _WaitPage(), 10, "test fix", lambda p: hits.append(1) or True))
+        self.assertEqual(hits, [])
+
+    def test_closed_page_returns_false(self):
+        bot = self._bot(5)
+        hits = []
+        self.assertFalse(bot.await_manual_fix(
+            _WaitPage(closed=True), 11, "test fix",
+            lambda p: hits.append(1) or True))
+        self.assertEqual(hits, [])
+
+    def test_exception_retries_once(self):
+        bot = self._bot(5)
+        state = {"n": 0}
+
+        def raised_then_done(p):
+            state["n"] += 1
+            if state["n"] == 1:
+                raise RuntimeError("navigation during fix")
+            return True
+
+        self.assertTrue(bot.await_manual_fix(
+            _WaitPage(), 12, "test fix", raised_then_done))
+        self.assertEqual(state["n"], 2)
 
 
 if __name__ == "__main__":

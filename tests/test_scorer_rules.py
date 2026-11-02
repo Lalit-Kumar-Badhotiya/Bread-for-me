@@ -1,4 +1,4 @@
-"""Regression gate for the scoring / experience rules.
+﻿"""Regression gate for the scoring / experience rules.
 
 config/targets.yaml is the source of truth: these tests assert what the bot
 must never do (apply to ".NET" postings, above-band experience, skill-less
@@ -8,6 +8,7 @@ Run:  .venv\\Scripts\\python.exe -m unittest discover -s tests -t . -v
 """
 import sys
 import unittest
+import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,7 +23,12 @@ TARGETS = yaml.safe_load(
     (ROOT / "config" / "targets.yaml").read_text(encoding="utf-8"))
 
 
-def _score(title: str, desc: str = "", posted: str = "2026-10-18"):
+def _score(title: str, desc: str = "", posted=None):
+    if posted is None:
+        # posted "today" â€” a hardcoded fixture date ages past the 14-day
+        # staleness limit and fails these tests for the wrong reason
+        # (bit 2026-11-02: the 2026-10-18 literal drifted to 15d old)
+        posted = datetime.date.today().isoformat()
     return score_job(title, "Acme Pvt Ltd", "Bangalore", desc, posted, TARGETS)
 
 
@@ -31,8 +37,7 @@ class ExcludeKeywordTests(unittest.TestCase):
         for title in (".NET Developer", "ASP.NET Core Engineer",
                       "dotnet developer", "Dot Net Developer",
                       "Backend Developer (.net)", "Senior .NET Engineer"):
-            _, reasons, reject = _score(title, "c# backend services",
-                                        "2026-10-18")
+            _, reasons, reject = _score(title, "c# backend services")
             self.assertTrue(reject, f"{title!r} should be excluded, got {reasons}")
             self.assertTrue(any("exclude" in r for r in reasons), reasons)
 
@@ -41,12 +46,11 @@ class ExcludeKeywordTests(unittest.TestCase):
         for title in ("Internet of Things Engineer",
                       "Network Software Engineer"):
             _, reasons, reject = _score(
-                title, "entry level, javascript and node work", "2026-10-18")
+                title, "entry level, javascript and node work")
             self.assertFalse(reject, f"{title!r} wrongly rejected: {reasons}")
 
     def test_senior_roles_rejected(self):
-        _, reasons, reject = _score("Senior Software Engineer", "javascript",
-                                    "2026-10-18")
+        _, reasons, reject = _score("Senior Software Engineer", "javascript")
         self.assertTrue(reject)
         self.assertTrue(any("exclude" in r for r in reasons))
 
@@ -83,7 +87,7 @@ class VerdictTests(unittest.TestCase):
     def test_detail_verdict_skills_gate(self):
         # 2026-10-20 calibration: must-have-ANY gained python/java/sql from
         # the resume, so a "Python developer" detail page passes the gate
-        # now — but a page with NONE of the must-have skills still fails.
+        # now â€” but a page with NONE of the must-have skills still fails.
         ok, _ = detail_verdict("Python developer, 0-1 years.", TARGETS)
         self.assertTrue(ok)
 

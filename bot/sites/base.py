@@ -869,6 +869,69 @@ class BaseSiteBot:
         finally:
             self._quiet_window(page, "minimized")  # taskbar again
 
+    # SmartApply identity gate: mid-flow the apply area (or the whole tab)
+    # can bounce to Indeed's sign-in page even WITH a live session — the
+    # identity service wants a fresh "Continue". Seen live 2026-11-02 on
+    # glassdoor + indeed: url secure.indeed.com/..., a minimized
+    # profile.indeed.com/... popup (popup guard telemetry), or the plain
+    # "Ready to take the next step? / Email address" page (title "Sign In |
+    # Indeed Accounts").
+    SMARTAPPLY_SIGNIN_RX = re.compile(
+        r"secure\.indeed\.com/(?:auth|signin)|profile\.indeed\.com", re.I)
+
+    def _smartapply_signin_gate(self, page: Page) -> bool:
+        """True when the page (root tab or any frame) is sitting on
+        Indeed's sign-in identity gate instead of an application form."""
+        try:
+            urls = [page.url or ""]
+            try:
+                urls += [fr.url or "" for fr in page.frames]
+            except Exception:
+                pass
+            for u in urls:
+                if u and self.SMARTAPPLY_SIGNIN_RX.search(u):
+                    return True
+            txt = (page.inner_text("body") or "").lower()
+        except Exception:
+            return False
+        # the sign-in headline + its only input; BOTH together so a normal
+        # SmartApply contact block (which has an email field) never matches
+        return ("ready to take the next step" in txt
+                and "email address" in txt)
+
+    def await_manual_fix(self, page: Page, jid, what: str, done_fn) -> bool:
+        """Bounded hands-needed wait INSIDE a form flow (SmartApply sign-in
+        gate, disabled submit awaiting a human tick). Toasts, then polls
+        while the user clicks the taskbar icon and completes the step;
+        done_fn(page) returning True ends the wait. False on timeout or a
+        closed window (one done_fn retry covers the in-flight navigations
+        these gates trigger). Mirrors await_manual_captcha."""
+        minutes = int((self.settings.get("limits", {}) or {})
+                      .get("captcha_manual_wait_min", 5))
+        self.notify.send(f"ACTION NEEDED — {what} on {self.name} "
+                         f"job {jid}: click the MINIMIZED browser icon "
+                         f"in the taskbar and finish it "
+                         f"(waiting up to {minutes} min)", toast=True)
+        try:
+            deadline = time.time() + minutes * 60
+            while time.time() < deadline:
+                try:
+                    page.wait_for_timeout(4000)
+                    if page.is_closed():
+                        return False
+                    fix_offscreen_restore(page)   # taskbar click -> visible
+                    if done_fn(page):
+                        return True
+                except Exception:
+                    try:
+                        if done_fn(page):
+                            return True
+                    except Exception:
+                        return False
+            return False
+        finally:
+            self._quiet_window(page, "minimized")  # taskbar again
+
     def _confirmation_phrase(self, page: Page) -> str:
         """The matched confirmation phrase ("" when none). Reads VISIBLE text
         only — page.content() includes <script> JSON that false-matched."""
@@ -1235,6 +1298,30 @@ class BaseSiteBot:
                 # file-input upload here is rejected server-side and pollutes
                 # the conversation (found live 2026-10-19, naukri 267/426)
                 return self.chatbot_flow(page, jid)
+            if self._smartapply_signin_gate(page):
+                # identity auto-continue hops (profile.indeed.com with a live
+                # session) move on by themselves — give them a beat before
+                # noising the user (2026-11-02)
+                try:
+                    page.wait_for_timeout(8000)
+                except Exception:
+                    pass
+            if self._smartapply_signin_gate(page):
+                # SmartApply bounced to Indeed's sign-in mid-flow ("Ready to
+                # take the next step?" / secure.indeed.com / profile popup):
+                # one human Continue fixes it — wait instead of parking
+                if self.await_manual_fix(
+                        page, jid, "SmartApply wants a fresh sign-in — "
+                        "click its Continue button",
+                        lambda p: not self._smartapply_signin_gate(p)):
+                    try:
+                        page.wait_for_timeout(3000)
+                    except Exception:
+                        pass
+                    continue   # the form re-renders with the identity applied
+                return ("needs_you", "SmartApply sign-in gate still up "
+                        "(manual wait timed out)",
+                        self.safe_shot(page, f"signin_{jid}"))
             target = self._resolve_form(page)
             progress = self._fill_pass(target)
             self.tick_declarations(target)
@@ -1316,6 +1403,19 @@ class BaseSiteBot:
                             self.safe_shot(page, f"verify_{jid}"))
                 dis = self._disabled_submit_probe(page)
                 if dis:
+                    # SmartApply review screens keep Submit disabled until a
+                    # human reCAPTCHA tick / required acknowledgment — one
+                    # user click finishes the application; wait for it
+                    if self.await_manual_fix(
+                            page, jid, "submit needs a human check — tick "
+                            "the reCAPTCHA box / acknowledgment then click "
+                            "Submit",
+                            lambda p: not self._disabled_submit_probe(p)):
+                        try:
+                            page.wait_for_timeout(2000)
+                        except Exception:
+                            pass
+                        continue   # form now submitable OR already submitted
                     why = ("needs your input: submit button is disabled"
                            + (" — reCAPTCHA/human check or required "
                               "acknowledgment pending" if dis.get("captcha") else "")
