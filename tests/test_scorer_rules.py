@@ -55,6 +55,30 @@ class ExcludeKeywordTests(unittest.TestCase):
         self.assertTrue(any("exclude" in r for r in reasons))
 
 
+class SeniorityBandTests(unittest.TestCase):
+    """Level-banded titles above the entry band are rejected even with no
+    years claim ('SDE - 3 - Frontend' applied once; live 2026-11-02)."""
+    def test_level_banded_titles_rejected(self):
+        for title in ("SDE - 3 - Frontend", "SDE 2 - Backend Platforms",
+                      "SDEII", "SDE II", "SDE III", "SDE-4",
+                      "Software Engineer 2", "Software Engineer - II",
+                      "Software Engineer III", "Backend Engineer II",
+                      "Developer L3", "Engineer L2 Backend",
+                      "Software Development Engineer II Full Stack"):
+            _, reasons, reject = _score(title, "javascript and node work")
+            self.assertTrue(reject, f"{title!r} must be rejected: {reasons}")
+            self.assertTrue(any("seniority" in r for r in reasons), reasons)
+
+    def test_entry_and_plain_titles_pass(self):
+        for title in ("SDE - 1 Full Stack", "SDE I - Full Stack", "SDE1",
+                      "SDE Intern", "SDE Intern - Backend",
+                      "Software Engineer Trainee", "Associate Software Engineer",
+                      "Developer", "Frontend Developer (SDE)",
+                      "Software Developer - Intern (React Js Developer)"):
+            _, reasons, reject = _score(title, "entry level, javascript and node work")
+            self.assertFalse(reject, f"{title!r} wrongly rejected: {reasons}")
+
+
 class ExperienceParserTests(unittest.TestCase):
     def test_low_end_of_range_is_the_minimum(self):
         self.assertEqual(_min_years_required("0-1 years"), [0.0])

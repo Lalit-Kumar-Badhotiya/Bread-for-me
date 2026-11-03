@@ -70,6 +70,15 @@ _FRESHER_SIGNAL_RX = re.compile(
     r"|\bno\s+(?:prior\s+)?experience\b"
     r"|\bwithout\s+experience\b", re.I)
 
+# Level-banded title suffixes = above-entry bands even with no years claim:
+# SDE/Developer/Engineer followed by 2..4, roman II..IV, or L2-L4.
+# "SDE - 3 - Frontend" slipped the fresher band and was applied once
+# (live 2026-11-02, cloudsek via simplyhired). SDE-1 / "I" / level-less
+# titles stay allowed — the experience/detail gates still judge those.
+_BAND_TITLE_RX = re.compile(
+    r"\b(?:sde|software engineer|developer|engineer)\s*[-–—]?\s*"
+    r"(?:2|3|4|ii|iii|iv|l[2-4])\b", re.I)
+
 
 def _min_years_required(blob: str) -> list[float]:
     """Every minimum-years figure stated as an experience requirement."""
@@ -104,6 +113,16 @@ def score_job(title, company, location, description, posted_date, targets):
         pat = (r"(?<![A-Za-z0-9])" + re.escape(kw.lower()) + r"(?![A-Za-z0-9])")
         if re.search(pat, blob):
             return 0, [f"exclude: '{kw}'"], True
+
+    # 0b) level-banded titles are above-entry postings even without any
+    #     years claim — "SDE - 3 - Frontend" APPLIED once through the
+    #     fresher band (live 2026-11-02, cloudsek via simplyhired). Title
+    #     levels 2..4 in digits, roman II..IV, or the L2/L3/L4 suffix are
+    #     senior bands; SDE-1 / "I" / level-less titles stay allowed and
+    #     remain judged on years by the experience/detail gates.
+    m = _BAND_TITLE_RX.search((title or "").lower())
+    if m:
+        return 0, [f"seniority: '{m.group(0).strip()}' band in title"], True
 
     band = str(targets.get("experience_band") or "").strip().lower()
     max_min = BAND_LIMITS.get(band)
