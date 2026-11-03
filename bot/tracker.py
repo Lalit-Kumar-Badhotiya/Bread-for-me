@@ -235,12 +235,20 @@ class Tracker:
         self.con.commit()
 
     def applied_today(self, source: str | None = None) -> int:
+        """New REAL submissions recorded today — counted from the jobs
+        ledger, not the applications ledger: a killed chunk orphans its
+        unfinished application rows (finished_at never set) and the ledger
+        count permanently lags reality that way — the day meter under-read
+        ~11 on 2026-11-02 and let indeed overflow the 25 cap. Pre-check
+        detections ("already applied on site") are NOT new submissions and
+        must never consume the cap either (they only flip jobs.status)."""
         today = dt.date.today().isoformat()
-        q = """SELECT COUNT(*) c FROM applications
-               WHERE status='applied' AND finished_at LIKE ?"""
+        q = """SELECT COUNT(*) c FROM jobs
+               WHERE status='applied' AND updated_at LIKE ?
+                 AND status_note LIKE 'confirmed:%'"""
         args: list = [f"{today}%"]
         if source:
-            q += " AND job_id IN (SELECT id FROM jobs WHERE source=?)"
+            q += " AND source=?"
             args.append(source)
         return self.con.execute(q, args).fetchone()["c"]
 

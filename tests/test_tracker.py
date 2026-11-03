@@ -24,6 +24,45 @@ class FingerprintTests(unittest.TestCase):
         self.assertNotEqual(a, b)
 
 
+class AppliedTodayTests(unittest.TestCase):
+    """The day meter counts ONLY new real submissions (jobs ledger,
+    'confirmed:' notes) — pre-check detections and date drift must not
+    shift the cap (2026-11-02 drift let indeed appplly 34/25)."""
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.t = Tracker(Path(tmp.name) / "t.db")
+        self.addCleanup(self.t.close)
+
+    def _row(self, title, note, source="naukri"):
+        jid, _ = self.t.upsert_job(
+            source=source, source_job_id=title, url="https://x/" + title,
+            title=title, company="Co " + title, location="Pune",
+            description="d", posted_date="2026-11-03")
+        self.t.set_status(jid, "applied", note)
+        return jid
+
+    def test_counts_only_real_submissions_today(self):
+        self._row("auk1", "confirmed: successfully applied")
+        self._row("ind1", "confirmed: you've applied", source="indeed")
+        self._row("sh1", "confirmed: application has been", source="simplyhired")
+        self._row("pc1", "pre-check: site already shows applied state")
+        self._row("pc2", "already applied on site (detected on job page)")
+        self.assertEqual(self.t.applied_today("naukri"), 1)
+        self.assertEqual(self.t.applied_today("indeed"), 1)
+        self.assertEqual(self.t.applied_today("simplyhired"), 1)
+        self.assertEqual(self.t.applied_today(None), 3)
+
+    def test_yesterday_does_not_count_and_no_notes_never_count(self):
+        jid = self._row("old1", "confirmed: successfully applied")
+        self.t.con.execute("UPDATE jobs SET updated_at='2026-11-02 10:00' "
+                           "WHERE id=?", (jid,))
+        self.t.con.commit()
+        self._row("bare1", "")                 # no note: never counted
+        self.assertEqual(self.t.applied_today("naukri"), 0)
+        self.assertEqual(self.t.applied_today(None), 0)
+
+
 class RetryRowsTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
